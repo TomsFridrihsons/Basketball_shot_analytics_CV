@@ -81,3 +81,7 @@ new_vids/
 *.zip
 *.tar.gz
 *.rar
+
+# Archived datasets (moved to archives/)
+Hooper-2/
+HooperAnalytic-1/
