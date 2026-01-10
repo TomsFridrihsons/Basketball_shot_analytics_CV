@@ -1,0 +1,14 @@
+names:
+- ball
+- hoop
+- player
+nc: 3
+roboflow:
+  license: CC BY 4.0
+  project: hooper
+  url: https://universe.roboflow.com/basketball-dataset/hooper/dataset/2
+  version: 2
+  workspace: basketball-dataset
+test: ../test/images
+train: ../train/images
+val: ../valid/images
