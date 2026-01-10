@@ -53,11 +53,12 @@ desktop.ini
 *.log
 logs/
 
-# Model weights (uncomment if you don't want to track models)
+# Model weights - only track best models, exclude large last checkpoints
 # *.pt
 # *.pth
 # *.onnx
 # *.torchscript
+models/*-last.pt
 
 # Data files (uncomment if datasets are large)
 # *.jpg
