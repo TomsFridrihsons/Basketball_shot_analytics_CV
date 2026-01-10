@@ -73,9 +73,16 @@ new_vids/
 *.temp
 .cache/
 
-# Environment variables
+# Environment variables and sensitive data
 .env
 .env.local
+.env.*
+!env.example
+configs/secrets.yaml
+configs/api_keys.yaml
+*.key
+*.secret
+secrets/
 
 # Archives (if you create them)
 *.zip
