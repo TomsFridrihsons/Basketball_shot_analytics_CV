@@ -1,0 +1,66 @@
+# Default Training Configuration
+# Modify these parameters as needed for your experiments
+
+# Model
+model: yolov8n.pt  # Options: yolov8n.pt, yolov8s.pt, yolov8m.pt, yolov8l.pt, yolov8x.pt
+
+# Dataset
+data: configs/datasets/dataset-name.yaml  # Update with your dataset config
+
+# Training parameters
+epochs: 100
+imgsz: 640
+batch: 16
+workers: 8
+
+# Optimization
+lr0: 0.01
+lrf: 0.01
+momentum: 0.937
+weight_decay: 0.0005
+warmup_epochs: 3.0
+warmup_momentum: 0.8
+warmup_bias_lr: 0.1
+
+# Augmentation
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+degrees: 0.0
+translate: 0.1
+scale: 0.5
+shear: 0.0
+perspective: 0.0
+flipud: 0.0
+fliplr: 0.5
+mosaic: 1.0
+mixup: 0.0
+copy_paste: 0.0
+
+# Output
+project: runs/detect
+name: experiment-name  # Change for each experiment
+save: true
+save_period: -1
+
+# Validation
+val: true
+
+# Other
+device: null  # null for auto, or specify: 0, 1, cpu
+verbose: true
+seed: 0
+deterministic: true
+single_cls: false
+rect: false
+cos_lr: false
+close_mosaic: 10
+resume: false
+amp: true
+fraction: 1.0
+profile: false
+freeze: null
+overlap_mask: true
+mask_ratio: 4
+dropout: 0.0
+val: true

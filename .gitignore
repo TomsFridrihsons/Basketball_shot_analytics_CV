@@ -85,3 +85,21 @@ new_vids/
 # Archived datasets (moved to archives/)
 Hooper-2/
 HooperAnalytic-1/
+
+# Data directories (exclude large data files)
+data/raw/
+data/processed/
+datasets/*/train/
+datasets/*/valid/
+datasets/*/test/
+
+# Evaluation outputs (keep structure, exclude large files)
+evaluations/plots/
+evaluations/metrics/*.csv
+evaluations/metrics/*.json
+
+# Keep directory structure but exclude contents
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!datasets/.gitkeep
+!evaluations/.gitkeep

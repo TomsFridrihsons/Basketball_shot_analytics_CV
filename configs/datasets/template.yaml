@@ -1,0 +1,25 @@
+# Dataset Configuration Template
+# Copy this file and modify for your specific dataset
+
+# Dataset path (relative to project root or absolute)
+path: datasets/dataset-name  # Change this to your dataset name
+
+# Dataset splits
+train: train/images  # Relative to 'path'
+val: valid/images    # Relative to 'path'
+test: test/images    # Optional, relative to 'path'
+
+# Number of classes
+nc: 3
+
+# Class names (update with your classes)
+names:
+  0: ball
+  1: hoop
+  2: player
+
+# Additional metadata (optional)
+# description: "Basketball detection dataset"
+# version: "1.0"
+# created: "2026-01-10"
+# source: "Roboflow / Custom annotation"

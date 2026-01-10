@@ -1,0 +1,2 @@
+# This file keeps the evaluations directory in Git
+# Large evaluation outputs are excluded via .gitignore
