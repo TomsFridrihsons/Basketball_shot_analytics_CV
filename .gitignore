@@ -62,8 +62,10 @@ logs/
 # Data files (uncomment if datasets are large)
 # *.jpg
 # *.png
-# *.mp4
-# *.avi
+# Large video files (excluded due to GitHub 2GB limit)
+*.mp4
+*.avi
+new_vids/
 
 # Temporary files
 *.tmp
