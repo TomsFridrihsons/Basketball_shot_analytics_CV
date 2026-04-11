@@ -1,33 +1,237 @@
-import pandas as pd
+import cv2
 import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import pandas as pd
+from ultralytics import YOLO
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras import layers
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras import layers, regularizers
 import pickle
-import json
 import os
+import json
+from datetime import datetime
 
 
-class ShotPredictionLSTM:
-    def __init__(self, data_path):
-        """
-        Initialize LSTM model for basketball shot prediction
+# Custom layer to replace Lambda (avoids serialization issues)
+@keras.utils.register_keras_serializable()
+class SumAlongAxis(layers.Layer):
+    """Custom layer to sum along axis 1 - replaces Lambda layer"""
+    def __init__(self, axis=1, **kwargs):
+        super().__init__(**kwargs)
+        self.axis = axis
+    
+    def call(self, x):
+        return tf.reduce_sum(x, axis=self.axis)
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({"axis": self.axis})
+        return config
+
+
+def focal_loss(gamma=2.0, alpha=0.25):
+    """Focal Loss - needed for model compilation"""
+    def focal_loss_fixed(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.clip_by_value(y_pred, 1e-7, 1 - 1e-7)
+        cross_entropy = -y_true * tf.math.log(y_pred) - (1 - y_true) * tf.math.log(1 - y_pred)
+        p_t = y_true * y_pred + (1 - y_true) * (1 - y_pred)
+        focal_weight = tf.pow(1 - p_t, gamma)
+        alpha_weight = y_true * alpha + (1 - y_true) * (1 - alpha)
+        focal_loss = alpha_weight * focal_weight * cross_entropy
+        return tf.reduce_mean(focal_loss)
+    return focal_loss_fixed
+
+
+def rebuild_lstm_model(max_len, n_features, lstm_units=128, dropout_rate=0.4, 
+                       use_attention=True, use_bidirectional=True, l2_reg=0.001):
+    """
+    Rebuild the LSTM model architecture to match training
+    """
+    inputs = layers.Input(shape=(max_len, n_features))
+    
+    # Masking layer for padded sequences
+    x = layers.Masking(mask_value=0.0)(inputs)
+    
+    # First LSTM layer (bidirectional)
+    if use_bidirectional:
+        x = layers.Bidirectional(
+            layers.LSTM(lstm_units, return_sequences=True,
+                       kernel_regularizer=regularizers.l2(l2_reg))
+        )(x)
+    else:
+        x = layers.LSTM(lstm_units, return_sequences=True,
+                       kernel_regularizer=regularizers.l2(l2_reg))(x)
+    
+    x = layers.BatchNormalization()(x)
+    x = layers.Dropout(dropout_rate)(x)
+    
+    # Second LSTM layer
+    if use_bidirectional:
+        x = layers.Bidirectional(
+            layers.LSTM(lstm_units // 2, return_sequences=True,
+                       kernel_regularizer=regularizers.l2(l2_reg))
+        )(x)
+    else:
+        x = layers.LSTM(lstm_units // 2, return_sequences=True,
+                       kernel_regularizer=regularizers.l2(l2_reg))(x)
+    
+    x = layers.BatchNormalization()(x)
+    x = layers.Dropout(dropout_rate)(x)
+    
+    # Attention mechanism
+    if use_attention:
+        attention_units = lstm_units // 2 * (2 if use_bidirectional else 1)  # 128 for bidirectional
         
-        Args:
-            data_path: Path to cleaned shot data CSV
-        """
-        self.data_path = data_path
-        self.scaler = StandardScaler()
-        self.model = None
-        self.max_len = None
-        self.history = None
+        attention = layers.Dense(1, activation='tanh')(x)
+        attention = layers.Flatten()(attention)
+        attention = layers.Activation('softmax')(attention)
+        attention = layers.RepeatVector(attention_units)(attention)
+        attention = layers.Permute([2, 1])(attention)
         
-        # Features to use for prediction
+        x = layers.Multiply()([x, attention])
+        # Use custom layer instead of Lambda
+        x = SumAlongAxis(axis=1)(x)
+    else:
+        if use_bidirectional:
+            x = layers.Bidirectional(
+                layers.LSTM(lstm_units // 4, return_sequences=False,
+                           kernel_regularizer=regularizers.l2(l2_reg))
+            )(x)
+        else:
+            x = layers.LSTM(lstm_units // 4, return_sequences=False,
+                           kernel_regularizer=regularizers.l2(l2_reg))(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Dropout(dropout_rate)(x)
+    
+    # Dense layers
+    dense1 = layers.Dense(64, activation='relu',
+                         kernel_regularizer=regularizers.l2(l2_reg))(x)
+    dense1 = layers.BatchNormalization()(dense1)
+    dense1 = layers.Dropout(dropout_rate)(dense1)
+    
+    dense2 = layers.Dense(32, activation='relu',
+                         kernel_regularizer=regularizers.l2(l2_reg))(dense1)
+    dense2 = layers.Dropout(dropout_rate / 2)(dense2)
+    
+    # Output layer
+    outputs = layers.Dense(1, activation='sigmoid')(dense2)
+    
+    model = keras.Model(inputs=inputs, outputs=outputs)
+    
+    return model
+
+
+def load_lstm_model_with_weights(model_path, config_path):
+    """
+    Load LSTM model by rebuilding architecture and loading weights
+    """
+    print("Loading model configuration...")
+    
+    # Load config to get model parameters
+    with open(config_path, 'rb') as f:
+        config = pickle.load(f)
+    
+    max_len = config.get('max_len', 68)
+    n_features = config.get('n_features', 18)
+    model_config = config.get('model_config', {})
+    
+    lstm_units = model_config.get('lstm_units', 128)
+    dropout_rate = model_config.get('dropout_rate', 0.4)
+    use_attention = model_config.get('use_attention', True)
+    use_bidirectional = model_config.get('use_bidirectional', True)
+    l2_reg = model_config.get('l2_reg', 0.001)
+    
+    print(f"  max_len: {max_len}")
+    print(f"  n_features: {n_features}")
+    print(f"  lstm_units: {lstm_units}")
+    print(f"  use_attention: {use_attention}")
+    print(f"  use_bidirectional: {use_bidirectional}")
+    
+    # Rebuild model
+    print("\nRebuilding model architecture...")
+    model = rebuild_lstm_model(
+        max_len=max_len,
+        n_features=n_features,
+        lstm_units=lstm_units,
+        dropout_rate=dropout_rate,
+        use_attention=use_attention,
+        use_bidirectional=use_bidirectional,
+        l2_reg=l2_reg
+    )
+    
+    # Try to load weights from the .keras file
+    print("\nLoading weights...")
+    
+    # Enable unsafe deserialization
+    keras.config.enable_unsafe_deserialization()
+    
+    # Extract weights from the saved model
+    import zipfile
+    import tempfile
+    
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        # .keras files are zip archives
+        with zipfile.ZipFile(model_path, 'r') as zip_ref:
+            zip_ref.extractall(tmp_dir)
+        
+        # Load weights from the extracted files
+        weights_path = os.path.join(tmp_dir, 'model.weights.h5')
+        if os.path.exists(weights_path):
+            try:
+                model.load_weights(weights_path)
+                print("  ✅ Weights loaded successfully!")
+            except Exception as e:
+                print(f"  ⚠️ Could not load weights directly: {e}")
+                print("  Attempting alternative weight loading...")
+                
+                # Try loading with by_name
+                try:
+                    model.load_weights(weights_path, by_name=True, skip_mismatch=True)
+                    print("  ✅ Weights loaded with by_name=True")
+                except Exception as e2:
+                    print(f"  ❌ Weight loading failed: {e2}")
+                    raise
+        else:
+            print(f"  ❌ Weights file not found in archive")
+            # List contents for debugging
+            print(f"  Archive contents: {os.listdir(tmp_dir)}")
+            raise FileNotFoundError("model.weights.h5 not found in .keras archive")
+    
+    # Compile model (optional, only needed for training/evaluation)
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        loss=focal_loss(gamma=2.0, alpha=0.3),
+        metrics=['accuracy']
+    )
+    
+    return model, config
+
+
+class RealTimeShotPredictor:
+    """
+    Real-time basketball shot prediction using YOLO + LSTM
+    """
+    
+    def __init__(self, yolo_model_path, lstm_model_path, scaler_path=None, config_path=None, output_dir=None):
+        print("=" * 60)
+        print("INITIALIZING SHOT PREDICTOR")
+        print("=" * 60)
+        
+        # Validate paths
+        if not os.path.exists(yolo_model_path):
+            raise FileNotFoundError(f"YOLO model not found: {yolo_model_path}")
+        if not os.path.exists(lstm_model_path):
+            raise FileNotFoundError(f"LSTM model not found: {lstm_model_path}")
+        
+        # Load YOLO model
+        print("\nLoading YOLO model...")
+        self.yolo_model = YOLO(yolo_model_path)
+        print(f"  ✅ YOLO loaded: {yolo_model_path}")
+        
+        # Initialize defaults
+        self.scaler = None
+        self.max_sequence_length = 68
+        self.optimal_threshold = 0.5
         self.feature_cols = [
             'ball_x', 'ball_y', 'ball_w', 'ball_h',
             'ball_velocity_x', 'ball_velocity_y',
@@ -37,454 +241,615 @@ class ShotPredictionLSTM:
             'ball_above_player'
         ]
         
-        # Initialize config storage
-        self.seq_stats = {}
-        self.training_config = {}
-        self.model_config = {}
-        self.train_config = {}
-        self.eval_metrics = {}
-    
-    def load_and_prepare_data(self):
-        """Load data and prepare sequences for LSTM"""
-        print("=== Loading Data ===")
-        df = pd.read_csv(self.data_path)
+        # Load LSTM model using weight reconstruction
+        print("\nLoading LSTM model...")
         
-        print(f"Total frames: {len(df)}")
-        print(f"Total shots: {df['shot_number'].nunique()}")
+        if config_path and os.path.exists(config_path):
+            try:
+                self.lstm_model, config = load_lstm_model_with_weights(lstm_model_path, config_path)
+                
+                self.max_sequence_length = config.get('max_len', 68)
+                self.feature_cols = config.get('feature_cols', self.feature_cols)
+                self.optimal_threshold = config.get('optimal_threshold', 0.5)
+                
+                print(f"\n  ✅ LSTM model loaded successfully")
+                print(f"  ✅ max_len: {self.max_sequence_length}")
+                print(f"  ✅ n_features: {len(self.feature_cols)}")
+                print(f"  ✅ optimal_threshold: {self.optimal_threshold}")
+                
+                if 'eval_metrics' in config:
+                    metrics = config['eval_metrics']
+                    print(f"\n  Model Training Metrics:")
+                    print(f"    Accuracy:  {metrics.get('test_accuracy', 0)*100:.1f}%")
+                    print(f"    Precision: {metrics.get('precision', 0)*100:.1f}%")
+                    print(f"    Recall:    {metrics.get('recall', 0)*100:.1f}%")
+                    print(f"    F1 Score:  {metrics.get('f1_score', 0)*100:.1f}%")
+                    
+            except Exception as e:
+                print(f"  ❌ Failed to load model with weights: {e}")
+                raise RuntimeError(f"Failed to load LSTM model: {e}")
+        else:
+            raise FileNotFoundError(f"Config file required for model loading: {config_path}")
         
-        # Get shot results
-        shot_results = df.groupby('shot_number')['shot_result'].first()
-        print(f"Made shots: {(shot_results == 1).sum()}")
-        print(f"Missed shots: {(shot_results == 0).sum()}")
-        
-        # Prepare sequences - one sequence per shot
-        X_sequences = []
-        y_labels = []
-        shot_ids = []
-        
-        for shot_num in df['shot_number'].unique():
-            shot_data = df[df['shot_number'] == shot_num].copy()
+        # Load scaler
+        if scaler_path and os.path.exists(scaler_path):
+            print(f"\nLoading scaler from {scaler_path}...")
+            with open(scaler_path, 'rb') as f:
+                self.scaler = pickle.load(f)
+            print(f"  ✅ Scaler type: {type(self.scaler).__name__}")
             
-            # Get features and fill any remaining NaN with 0
-            features = shot_data[self.feature_cols].fillna(0).values
-            
-            # Get label (same for all frames in a shot)
-            label = shot_data['shot_result'].iloc[0]
-            
-            X_sequences.append(features)
-            y_labels.append(label)
-            shot_ids.append(shot_num)
+            if hasattr(self.scaler, 'center_'):
+                print(f"  ✅ RobustScaler fitted with {len(self.scaler.center_)} features")
+            elif hasattr(self.scaler, 'mean_'):
+                print(f"  ✅ StandardScaler fitted with {len(self.scaler.mean_)} features")
+        else:
+            from sklearn.preprocessing import RobustScaler
+            self.scaler = RobustScaler()
+            print("⚠️ WARNING: No scaler file found. Predictions will be inaccurate!")
         
-        self.X_raw = X_sequences
-        self.y = np.array(y_labels)
-        self.shot_ids = shot_ids
+        # Output directory
+        self.output_base_dir = output_dir or os.path.join(os.getcwd(), "processed_videos")
+        os.makedirs(self.output_base_dir, exist_ok=True)
         
-        print(f"\n=== Sequence Statistics ===")
-        seq_lengths = [len(seq) for seq in X_sequences]
-        print(f"Min sequence length: {min(seq_lengths)} frames")
-        print(f"Max sequence length: {max(seq_lengths)} frames")
-        print(f"Mean sequence length: {np.mean(seq_lengths):.1f} frames")
+        # Shot tracking
+        self.reset_shot_state()
         
-        # Store statistics for config
-        self.seq_stats = {
-            'min_len': int(min(seq_lengths)),
-            'max_len': int(max(seq_lengths)),
-            'mean_len': float(np.mean(seq_lengths)),
-            'total_shots': len(X_sequences),
-            'made_shots': int((self.y == 1).sum()),
-            'missed_shots': int((self.y == 0).sum())
+        # Statistics tracking
+        self.reset_statistics()
+        
+        # Last known basket position
+        self.last_basket_x = None
+        self.last_basket_y = None
+        self.last_basket_w = None
+        self.last_basket_h = None
+        
+        # Display settings
+        self.display_width = 1280
+        self.display_max_height = 900
+        
+        print(f"\n{'=' * 60}")
+        print("INITIALIZATION COMPLETE")
+        print(f"{'=' * 60}")
+        print(f"  Prediction threshold: {self.optimal_threshold}")
+        print(f"  Max sequence length: {self.max_sequence_length}")
+        print(f"  Output directory: {self.output_base_dir}")
+
+    def reset_statistics(self):
+        """Reset statistics tracking"""
+        self.statistics = {
+            'total_shots_detected': 0,
+            'predicted_made': 0,
+            'predicted_missed': 0,
+            'high_confidence_predictions': 0,
+            'low_confidence_predictions': 0,
+            'shots': [],
+            'processing_start_time': None,
+            'processing_end_time': None,
+            'video_info': {},
+            'model_info': {
+                'max_sequence_length': self.max_sequence_length,
+                'n_features': len(self.feature_cols),
+                'optimal_threshold': self.optimal_threshold
+            }
         }
         
-        return X_sequences, y_labels
+    def reset_shot_state(self):
+        """Reset shot tracking state"""
+        self.possible_shot = False
+        self.actual_shot = False
+        self.possible_shot_frame_count = 0
+        self.pre_recorded_data = []
+        self.current_shot_data = []
+        self.frame_count = 0
+        self.last_prediction = None
+        self.last_probability = None
+        self.current_shot_start_frame = None
+        
+    def extract_features(self, ball_boxes, player_boxes, basket_boxes, fps):
+        """Extract features from detections"""
+        # Ball data
+        if len(ball_boxes) > 0:
+            ball = ball_boxes[0]
+            ball_x = (ball[0] + ball[2]) / 2
+            ball_y = (ball[1] + ball[3]) / 2
+            ball_w = ball[2] - ball[0]
+            ball_h = ball[3] - ball[1]
+        else:
+            ball_x = ball_y = ball_w = ball_h = None
+        
+        # Player data (closest to ball)
+        if len(player_boxes) > 0 and ball_x is not None:
+            closest_player = self._find_closest_player(ball_boxes[0], player_boxes)
+            player_x = (closest_player[0] + closest_player[2]) / 2
+            player_y = (closest_player[1] + closest_player[3]) / 2
+            player_w = closest_player[2] - closest_player[0]
+            player_h = closest_player[3] - closest_player[1]
+            player_top = closest_player[1]
+        else:
+            player_x = player_y = player_w = player_h = None
+            player_top = None
+        
+        # Basket data with failsafe
+        if len(basket_boxes) > 0:
+            basket = basket_boxes[0]
+            basket_x = (basket[0] + basket[2]) / 2
+            basket_y = (basket[1] + basket[3]) / 2
+            basket_w = basket[2] - basket[0]
+            basket_h = basket[3] - basket[1]
+            
+            self.last_basket_x = basket_x
+            self.last_basket_y = basket_y
+            self.last_basket_w = basket_w
+            self.last_basket_h = basket_h
+        else:
+            basket_x = self.last_basket_x
+            basket_y = self.last_basket_y
+            basket_w = self.last_basket_w
+            basket_h = self.last_basket_h
+        
+        # Calculate derived features
+        if ball_x is not None and player_x is not None:
+            ball_player_dist = np.sqrt((ball_x - player_x)**2 + (ball_y - player_y)**2)
+            ball_above_player = 1 if ball_y < player_top else 0
+        else:
+            ball_player_dist = None
+            ball_above_player = None
+        
+        if ball_x is not None and basket_x is not None:
+            ball_basket_dist = np.sqrt((ball_x - basket_x)**2 + (ball_y - basket_y)**2)
+            ball_basket_angle = np.arctan2(basket_y - ball_y, basket_x - ball_x)
+        else:
+            ball_basket_dist = None
+            ball_basket_angle = None
+        
+        # Calculate velocity
+        ball_velocity_x = ball_velocity_y = None
+        prev_data = None
+        
+        if len(self.current_shot_data) > 0:
+            prev_data = self.current_shot_data[-1]
+        elif len(self.pre_recorded_data) > 0:
+            prev_data = self.pre_recorded_data[-1]
+            
+        if prev_data is not None and ball_x is not None:
+            if prev_data[0] is not None:
+                dt = 1.0 / fps if fps > 0 else 1/30
+                ball_velocity_x = (ball_x - prev_data[0]) / dt
+                ball_velocity_y = (ball_y - prev_data[1]) / dt
+        
+        features = [
+            ball_x, ball_y, ball_w, ball_h,
+            ball_velocity_x, ball_velocity_y,
+            player_x, player_y, player_w, player_h,
+            basket_x, basket_y, basket_w, basket_h,
+            ball_player_dist, ball_basket_dist, ball_basket_angle,
+            ball_above_player
+        ]
+        
+        return features
     
-    def pad_sequences(self, X_sequences, max_len=None):
-        """Pad sequences to same length for LSTM input"""
-        if max_len is None:
-            max_len = max(len(seq) for seq in X_sequences)
-        
-        n_features = X_sequences[0].shape[1]
-        X_padded = np.zeros((len(X_sequences), max_len, n_features))
-        
-        for i, seq in enumerate(X_sequences):
-            seq_len = min(len(seq), max_len)
-            X_padded[i, :seq_len, :] = seq[:seq_len]
-        
-        return X_padded, max_len
-    
-    def prepare_train_test_split(self, test_size=0.2, random_state=42, augment=True):
-        """Split data into train and test sets with optional augmentation"""
-        print("\n=== Preparing Train/Test Split ===")
-        
-        # Pad sequences
-        X_padded, self.max_len = self.pad_sequences(self.X_raw)
-        
-        # Data augmentation for training set
-        if augment:
-            print("Applying data augmentation...")
-            X_augmented = []
-            y_augmented = []
-            
-            for i, (seq, label) in enumerate(zip(X_padded, self.y)):
-                # Original
-                X_augmented.append(seq)
-                y_augmented.append(label)
-                
-                # Add noise (small random variations)
-                noise = np.random.normal(0, 0.02, seq.shape)
-                X_augmented.append(seq + noise)
-                y_augmented.append(label)
-                
-                # Time shift (shift sequence by 1-3 frames)
-                shift = np.random.randint(1, 4)
-                shifted = np.roll(seq, shift, axis=0)
-                X_augmented.append(shifted)
-                y_augmented.append(label)
-            
-            X_padded = np.array(X_augmented)
-            self.y = np.array(y_augmented)
-            print(f"Augmented to {len(X_padded)} sequences (3x original)")
-        
-        # Normalize features
-        n_samples, n_timesteps, n_features = X_padded.shape
-        X_reshaped = X_padded.reshape(-1, n_features)
-        X_scaled = self.scaler.fit_transform(X_reshaped)
-        X_scaled = X_scaled.reshape(n_samples, n_timesteps, n_features)
-        
-        # Split data
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            X_scaled, self.y, test_size=test_size, random_state=random_state, stratify=self.y
-        )
-        
-        print(f"Training samples: {len(self.X_train)}")
-        print(f"Test samples: {len(self.X_test)}")
-        print(f"Sequence length: {self.max_len} frames")
-        print(f"Features per frame: {n_features}")
-        
-        # Store training config
-        self.training_config = {
-            'test_size': test_size,
-            'random_state': random_state,
-            'augment': augment,
-            'n_train_samples': len(self.X_train),
-            'n_test_samples': len(self.X_test)
-        }
-        
-        return self.X_train, self.X_test, self.y_train, self.y_test
-    
-    def build_model(self, lstm_units=128, dropout_rate=0.4):
-        """Build LSTM model"""
-        print("\n=== Building LSTM Model ===")
-        
-        model = keras.Sequential([
-            # First LSTM layer
-            layers.LSTM(lstm_units, return_sequences=True, 
-                       input_shape=(self.max_len, len(self.feature_cols))),
-            layers.BatchNormalization(),
-            layers.Dropout(dropout_rate),
-            
-            # Second LSTM layer
-            layers.LSTM(lstm_units // 2, return_sequences=True),
-            layers.BatchNormalization(),
-            layers.Dropout(dropout_rate),
-            
-            # Third LSTM layer
-            layers.LSTM(lstm_units // 4, return_sequences=False),
-            layers.BatchNormalization(),
-            layers.Dropout(dropout_rate),
-            
-            # Dense layers
-            layers.Dense(64, activation='relu'),
-            layers.BatchNormalization(),
-            layers.Dropout(dropout_rate),
-            
-            layers.Dense(32, activation='relu'),
-            layers.Dropout(dropout_rate / 2),
-            
-            # Output layer (binary classification)
-            layers.Dense(1, activation='sigmoid')
+    def _find_closest_player(self, ball_box, player_boxes):
+        """Find player closest to ball"""
+        ball_center = np.array([
+            (ball_box[0] + ball_box[2]) / 2,
+            (ball_box[1] + ball_box[3]) / 2
         ])
         
-        model.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=0.001),
-            loss='binary_crossentropy',
-            metrics=['accuracy', keras.metrics.Precision(), keras.metrics.Recall()]
-        )
+        min_dist = float('inf')
+        closest_player = player_boxes[0]
         
-        self.model = model
+        for player in player_boxes:
+            player_center = np.array([
+                (player[0] + player[2]) / 2,
+                (player[1] + player[3]) / 2
+            ])
+            dist = np.linalg.norm(ball_center - player_center)
+            if dist < min_dist:
+                min_dist = dist
+                closest_player = player
         
-        # Store model config
-        self.model_config = {
-            'lstm_units': lstm_units,
-            'dropout_rate': dropout_rate,
-            'learning_rate': 0.001,
-            'optimizer': 'Adam',
-            'loss': 'binary_crossentropy'
+        return closest_player
+    
+    def detect_shot(self, ball_boxes, player_boxes):
+        """Detect if shot is in progress with two-stage detection"""
+        if len(ball_boxes) == 0 or len(player_boxes) == 0:
+            if self.possible_shot and not self.actual_shot:
+                self.possible_shot_frame_count += 1
+                if self.possible_shot_frame_count > 20:
+                    print("[POSSIBLE SHOT CANCELLED - No detections]")
+                    self.possible_shot = False
+                    self.possible_shot_frame_count = 0
+                    self.pre_recorded_data = []
+            return False, False, False
+        
+        ball = ball_boxes[0]
+        ball_y_bottom = ball[3]
+        ball_y_center = (ball[1] + ball[3]) / 2
+        
+        player_tops = [p[1] for p in player_boxes]
+        highest_player_top = min(player_tops)
+        
+        ball_above_players = ball_y_bottom < highest_player_top
+        ball_below_player_top = ball_y_center > highest_player_top
+        
+        possible_shot_started = False
+        actual_shot_started = False
+        shot_ended = False
+        
+        if not self.possible_shot and not self.actual_shot and ball_above_players:
+            self.possible_shot = True
+            self.possible_shot_frame_count = 0
+            self.pre_recorded_data = []
+            possible_shot_started = True
+            self.current_shot_start_frame = self.frame_count
+            print("\n[POSSIBLE SHOT DETECTED - Monitoring...]")
+        
+        if self.possible_shot and not self.actual_shot:
+            self.possible_shot_frame_count += 1
+            
+            if ball_above_players:
+                if self.possible_shot_frame_count >= 10:
+                    self.actual_shot = True
+                    self.possible_shot = False
+                    self.current_shot_data = self.pre_recorded_data.copy()
+                    self.pre_recorded_data = []
+                    actual_shot_started = True
+                    print(f"[ACTUAL SHOT CONFIRMED - {len(self.current_shot_data)} frames pre-recorded]")
+            else:
+                print(f"[POSSIBLE SHOT CANCELLED - Only {self.possible_shot_frame_count} frames]")
+                self.possible_shot = False
+                self.possible_shot_frame_count = 0
+                self.pre_recorded_data = []
+        
+        if self.actual_shot and ball_below_player_top:
+            self.actual_shot = False
+            shot_ended = True
+        
+        return possible_shot_started, actual_shot_started, shot_ended
+    
+    def predict_shot_outcome(self):
+        """Make prediction using optimal threshold from training"""
+        if len(self.current_shot_data) < 5:
+            print(f"[WARNING] Not enough frames for prediction: {len(self.current_shot_data)}")
+            return None, None
+        
+        sequence = np.array(self.current_shot_data, dtype=np.float32)
+        sequence = np.nan_to_num(sequence, nan=0.0)
+        
+        print(f"\n[DEBUG] Sequence shape: {sequence.shape}")
+        
+        max_len = self.max_sequence_length
+        n_features = len(self.feature_cols)
+        
+        padded_sequence = np.zeros((1, max_len, n_features), dtype=np.float32)
+        seq_len = min(len(sequence), max_len)
+        padded_sequence[0, :seq_len, :] = sequence[:seq_len]
+        
+        n_samples, n_timesteps, n_feats = padded_sequence.shape
+        X_reshaped = padded_sequence.reshape(-1, n_feats)
+        
+        if self.scaler is None:
+            print("[ERROR] Scaler is None!")
+            return None, None
+        
+        is_fitted = hasattr(self.scaler, 'center_') or hasattr(self.scaler, 'mean_')
+        
+        if not is_fitted:
+            print("[ERROR] Scaler is not fitted!")
+            X_scaled = padded_sequence
+        else:
+            try:
+                X_scaled = self.scaler.transform(X_reshaped)
+                X_scaled = X_scaled.reshape(n_samples, n_timesteps, n_feats)
+            except Exception as e:
+                print(f"[ERROR] Scaler transform failed: {e}")
+                X_scaled = padded_sequence
+        
+        prediction_proba = self.lstm_model.predict(X_scaled, verbose=0)[0][0]
+        prediction = 1 if prediction_proba >= self.optimal_threshold else 0
+        
+        print(f"[DEBUG] Raw probability: {prediction_proba:.4f}")
+        print(f"[DEBUG] Threshold: {self.optimal_threshold:.3f}")
+        print(f"[DEBUG] Prediction: {'MADE' if prediction == 1 else 'MISSED'}")
+        
+        return prediction, float(prediction_proba)
+    
+    def get_confidence_level(self, probability):
+        """Categorize confidence level"""
+        distance_from_threshold = abs(probability - self.optimal_threshold)
+        
+        if distance_from_threshold > 0.3:
+            return 'HIGH', min(probability, 1 - probability) + 0.5
+        elif distance_from_threshold > 0.15:
+            return 'MEDIUM', 0.5 + distance_from_threshold
+        else:
+            return 'LOW', 0.5 + distance_from_threshold * 0.5
+    
+    def create_output_folder(self, video_path):
+        """Create timestamped output folder"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        folder_name = f"{timestamp}_{video_name}"
+        
+        output_folder = os.path.join(self.output_base_dir, folder_name)
+        os.makedirs(output_folder, exist_ok=True)
+        
+        return output_folder, timestamp
+    
+    def save_statistics(self, output_folder, video_path):
+        """Save statistics to files"""
+        total_shots = self.statistics['total_shots_detected']
+        made_shots = self.statistics['predicted_made']
+        missed_shots = self.statistics['predicted_missed']
+        
+        make_percentage = (made_shots / total_shots * 100) if total_shots > 0 else 0.0
+        
+        self.statistics['summary'] = {
+            'total_shots': total_shots,
+            'predicted_made': made_shots,
+            'predicted_missed': missed_shots,
+            'predicted_make_percentage': round(make_percentage, 2),
+            'high_confidence_predictions': self.statistics['high_confidence_predictions'],
+            'low_confidence_predictions': self.statistics['low_confidence_predictions'],
+            'input_video': video_path,
+            'threshold_used': self.optimal_threshold,
+            'processing_duration_seconds': None
         }
         
-        print(model.summary())
-        return model
+        if self.statistics['processing_start_time'] and self.statistics['processing_end_time']:
+            start = datetime.fromisoformat(self.statistics['processing_start_time'])
+            end = datetime.fromisoformat(self.statistics['processing_end_time'])
+            duration = (end - start).total_seconds()
+            self.statistics['summary']['processing_duration_seconds'] = round(duration, 2)
+        
+        json_path = os.path.join(output_folder, "statistics.json")
+        with open(json_path, 'w') as f:
+            json.dump(self.statistics, f, indent=4, default=str)
+        print(f"Statistics saved to: {json_path}")
+        
+        if len(self.statistics['shots']) > 0:
+            csv_path = os.path.join(output_folder, "shots.csv")
+            df = pd.DataFrame(self.statistics['shots'])
+            df.to_csv(csv_path, index=False)
+            print(f"Shots CSV saved to: {csv_path}")
+        
+        summary_path = os.path.join(output_folder, "summary.txt")
+        with open(summary_path, 'w') as f:
+            f.write("=" * 50 + "\n")
+            f.write("BASKETBALL SHOT PREDICTION - SUMMARY\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Input Video: {os.path.basename(video_path)}\n")
+            f.write(f"Processing Time: {self.statistics['summary']['processing_duration_seconds']} seconds\n")
+            f.write(f"Prediction Threshold: {self.optimal_threshold:.3f}\n\n")
+            f.write("-" * 50 + "\n")
+            f.write("RESULTS\n")
+            f.write("-" * 50 + "\n")
+            f.write(f"Total Shots Detected: {total_shots}\n")
+            f.write(f"Predicted Made: {made_shots}\n")
+            f.write(f"Predicted Missed: {missed_shots}\n")
+            f.write(f"Predicted Make %: {make_percentage:.1f}%\n\n")
+        
+        print(f"Summary saved to: {summary_path}")
+        return json_path, summary_path
     
-    def train(self, epochs=100, batch_size=16, patience=15):
-        """Train the LSTM model"""
-        print("\n=== Training Model ===")
+    def process_video(self, video_path, display=True, save_video=True, verbose=True):
+        """Process video with real-time shot prediction"""
+        self.reset_statistics()
+        self.reset_shot_state()
         
-        # Callbacks
-        early_stop = EarlyStopping(
-            monitor='val_loss',
-            patience=patience,
-            restore_best_weights=True,
-            verbose=1
-        )
+        cap = cv2.VideoCapture(video_path)
         
-        checkpoint = ModelCheckpoint(
-            'best_shot_model.h5',
-            monitor='val_accuracy',
-            save_best_only=True,
-            verbose=1
-        )
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {video_path}")
         
-        # Train
-        history = self.model.fit(
-            self.X_train, self.y_train,
-            validation_split=0.2,
-            epochs=epochs,
-            batch_size=batch_size,
-            callbacks=[early_stop, checkpoint],
-            verbose=1
-        )
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        duration_seconds = total_frames / fps if fps > 0 else 0
         
-        self.history = history
-        
-        # Store training hyperparameters
-        self.train_config = {
-            'epochs_requested': epochs,
-            'epochs_trained': len(history.history['loss']),
-            'batch_size': batch_size,
-            'patience': patience,
-            'best_val_accuracy': float(max(history.history['val_accuracy'])),
-            'best_val_loss': float(min(history.history['val_loss'])),
-            'final_train_accuracy': float(history.history['accuracy'][-1]),
-            'final_train_loss': float(history.history['loss'][-1])
+        self.statistics['video_info'] = {
+            'input_path': video_path,
+            'fps': fps,
+            'total_frames': total_frames,
+            'width': frame_width,
+            'height': frame_height,
+            'duration_seconds': round(duration_seconds, 2)
         }
         
-        return history
-    
-    def evaluate(self):
-        """Evaluate model on test set"""
-        print("\n=== Evaluating Model ===")
+        output_folder, timestamp = self.create_output_folder(video_path)
         
-        # Predictions
-        y_pred_proba = self.model.predict(self.X_test)
-        y_pred = (y_pred_proba > 0.5).astype(int).flatten()
+        video_writer = None
+        if save_video:
+            output_video_path = os.path.join(output_folder, "processed_video.mp4")
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
         
-        # Metrics
-        accuracy = accuracy_score(self.y_test, y_pred)
-        print(f"\nTest Accuracy: {accuracy:.4f}")
+        self.statistics['processing_start_time'] = datetime.now().isoformat()
         
-        print("\nClassification Report:")
-        print(classification_report(self.y_test, y_pred, 
-                                   target_names=['Missed', 'Made']))
+        print(f"\n{'=' * 60}")
+        print("PROCESSING VIDEO")
+        print(f"{'=' * 60}")
+        print(f"Input: {video_path}")
+        print(f"Output folder: {output_folder}")
+        print(f"FPS: {fps}, Total frames: {total_frames}")
+        print(f"Prediction threshold: {self.optimal_threshold:.3f}")
         
-        print("\nConfusion Matrix:")
-        cm = confusion_matrix(self.y_test, y_pred)
-        print(cm)
-        print(f"\nTrue Negatives (Correctly predicted misses): {cm[0,0]}")
-        print(f"False Positives (Predicted made, actually missed): {cm[0,1]}")
-        print(f"False Negatives (Predicted missed, actually made): {cm[1,0]}")
-        print(f"True Positives (Correctly predicted makes): {cm[1,1]}")
+        if display:
+            print("\nPress 'q' to quit, 'r' to reset")
         
-        # Calculate precision and recall safely
-        precision = float(cm[1, 1] / (cm[1, 1] + cm[0, 1])) if (cm[1, 1] + cm[0, 1]) > 0 else 0.0
-        recall = float(cm[1, 1] / (cm[1, 1] + cm[1, 0])) if (cm[1, 1] + cm[1, 0]) > 0 else 0.0
+        last_progress = -1
         
-        # Store evaluation metrics
-        self.eval_metrics = {
-            'test_accuracy': float(accuracy),
-            'true_negatives': int(cm[0, 0]),
-            'false_positives': int(cm[0, 1]),
-            'false_negatives': int(cm[1, 0]),
-            'true_positives': int(cm[1, 1]),
-            'precision': precision,
-            'recall': recall
-        }
-        
-        return accuracy, y_pred, y_pred_proba
-    
-    def plot_training_history(self, save_path='training_history.png'):
-        """Plot training history"""
-        if self.history is None:
-            print("No training history available. Train the model first.")
-            return
-        
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        
-        # Accuracy
-        axes[0, 0].plot(self.history.history['accuracy'], label='Train')
-        axes[0, 0].plot(self.history.history['val_accuracy'], label='Validation')
-        axes[0, 0].set_title('Model Accuracy')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Accuracy')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True)
-        
-        # Loss
-        axes[0, 1].plot(self.history.history['loss'], label='Train')
-        axes[0, 1].plot(self.history.history['val_loss'], label='Validation')
-        axes[0, 1].set_title('Model Loss')
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('Loss')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True)
-        
-        # Precision
-        axes[1, 0].plot(self.history.history['precision'], label='Train')
-        axes[1, 0].plot(self.history.history['val_precision'], label='Validation')
-        axes[1, 0].set_title('Model Precision')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('Precision')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True)
-        
-        # Recall
-        axes[1, 1].plot(self.history.history['recall'], label='Train')
-        axes[1, 1].plot(self.history.history['val_recall'], label='Validation')
-        axes[1, 1].set_title('Model Recall')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Recall')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True)
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"\nTraining history saved to '{save_path}'")
-        plt.show()
-    
-    def save_model(self, path='shot_prediction_model.h5'):
-        """Save trained model, scaler, and config"""
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        
-        # Save model
-        self.model.save(path)
-        print(f"\nModel saved to {path}")
-        
-        # Save scaler for inference
-        scaler_path = path.replace('.h5', '_scaler.pkl')
-        with open(scaler_path, 'wb') as f:
-            pickle.dump(self.scaler, f)
-        print(f"Scaler saved to {scaler_path}")
-        
-        # Build comprehensive config
-        config = {
-            # Essential for inference
-            'max_len': self.max_len,
-            'feature_cols': self.feature_cols,
-            'n_features': len(self.feature_cols),
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
             
-            # Model architecture info
-            'model_config': self.model_config,
+            self.frame_count += 1
             
-            # Training info
-            'training_config': self.training_config,
-            'train_config': self.train_config,
+            progress = int((self.frame_count / total_frames) * 100)
+            if progress % 10 == 0 and progress != last_progress:
+                print(f"[PROGRESS] {progress}%")
+                last_progress = progress
             
-            # Data statistics
-            'seq_stats': self.seq_stats,
+            results = self.yolo_model(frame, conf=0.75, verbose=False)[0]
             
-            # Evaluation metrics
-            'eval_metrics': self.eval_metrics,
+            ball_boxes = []
+            player_boxes = []
+            basket_boxes = []
             
-            # Paths
-            'model_path': path,
-            'scaler_path': scaler_path
-        }
+            for box in results.boxes:
+                cls = int(box.cls[0])
+                xyxy = box.xyxy[0].cpu().numpy()
+                
+                if cls == 0:
+                    ball_boxes.append(xyxy)
+                elif cls == 1:
+                    basket_boxes.append(xyxy)
+                elif cls == 2:
+                    player_boxes.append(xyxy)
+            
+            possible_shot_started, actual_shot_started, shot_ended = self.detect_shot(ball_boxes, player_boxes)
+            
+            if possible_shot_started:
+                self.pre_recorded_data = []
+            
+            if actual_shot_started:
+                self.last_prediction = None
+                self.last_probability = None
+            
+            if self.possible_shot or self.actual_shot:
+                features = self.extract_features(ball_boxes, player_boxes, basket_boxes, fps)
+                
+                if self.possible_shot:
+                    self.pre_recorded_data.append(features)
+                elif self.actual_shot:
+                    self.current_shot_data.append(features)
+            
+            if shot_ended and len(self.current_shot_data) > 0:
+                prediction, probability = self.predict_shot_outcome()
+                self.last_prediction = prediction
+                self.last_probability = probability
+                
+                if prediction is not None:
+                    result_text = "MADE" if prediction == 1 else "MISSED"
+                    conf_level, _ = self.get_confidence_level(probability)
+                    
+                    if verbose:
+                        print(f"[PREDICTION] {result_text} (prob: {probability:.2%}, conf: {conf_level})")
+                    
+                    self.statistics['total_shots_detected'] += 1
+                    if prediction == 1:
+                        self.statistics['predicted_made'] += 1
+                    else:
+                        self.statistics['predicted_missed'] += 1
+                    
+                    if conf_level == 'HIGH':
+                        self.statistics['high_confidence_predictions'] += 1
+                    else:
+                        self.statistics['low_confidence_predictions'] += 1
+                    
+                    shot_info = {
+                        'shot_number': self.statistics['total_shots_detected'],
+                        'prediction': int(prediction),
+                        'prediction_text': result_text,
+                        'confidence': float(probability),
+                        'confidence_level': conf_level,
+                        'start_frame': self.current_shot_start_frame,
+                        'end_frame': self.frame_count,
+                        'duration_frames': len(self.current_shot_data)
+                    }
+                    self.statistics['shots'].append(shot_info)
+                
+                self.current_shot_data = []
+            
+            # Draw overlays
+            annotated_frame = results.plot()
+            
+            if self.possible_shot:
+                cv2.rectangle(annotated_frame, (10, 10), (700, 60), (0, 165, 255), -1)
+                cv2.putText(annotated_frame, f"POSSIBLE SHOT... ({self.possible_shot_frame_count}/10)", 
+                           (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+            elif self.actual_shot:
+                cv2.rectangle(annotated_frame, (10, 10), (700, 60), (0, 255, 0), -1)
+                cv2.putText(annotated_frame, f"TRACKING ({len(self.current_shot_data)} frames)", 
+                           (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+            elif self.last_prediction is not None:
+                color = (0, 255, 0) if self.last_prediction == 1 else (0, 0, 255)
+                text = "MADE" if self.last_prediction == 1 else "MISSED"
+                cv2.rectangle(annotated_frame, (10, 10), (400, 60), color, -1)
+                cv2.putText(annotated_frame, f"{text} ({self.last_probability:.1%})", 
+                           (20, 45), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            
+            # Counter
+            counter = f"Shots: {self.statistics['total_shots_detected']} | Made: {self.statistics['predicted_made']}"
+            cv2.rectangle(annotated_frame, (10, frame_height - 40), (400, frame_height - 5), (0, 0, 0), -1)
+            cv2.putText(annotated_frame, counter, (20, frame_height - 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            if video_writer is not None:
+                video_writer.write(annotated_frame)
+            
+            if display:
+                h, w = annotated_frame.shape[:2]
+                scale = min(self.display_width / w, self.display_max_height / h)
+                resized = cv2.resize(annotated_frame, (int(w * scale), int(h * scale)))
+                cv2.imshow('Shot Prediction', resized)
+                
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                elif key == ord('r'):
+                    self.reset_shot_state()
         
-        # Save config as pickle
-        config_path = path.replace('.h5', '_config.pkl')
-        with open(config_path, 'wb') as f:
-            pickle.dump(config, f)
-        print(f"Config (pickle) saved to {config_path}")
+        cap.release()
+        if video_writer:
+            video_writer.release()
+        if display:
+            cv2.destroyAllWindows()
         
-        # Also save config as JSON for human readability
-        json_config_path = path.replace('.h5', '_config.json')
-        with open(json_config_path, 'w') as f:
-            json.dump(config, f, indent=4)
-        print(f"Config (JSON) saved to {json_config_path}")
+        self.statistics['processing_end_time'] = datetime.now().isoformat()
+        self.save_statistics(output_folder, video_path)
         
-        # Print config summary
-        print("\n=== Config Summary ===")
-        print(f"  max_len: {config['max_len']}")
-        print(f"  n_features: {config['n_features']}")
-        print(f"  feature_cols: {config['feature_cols']}")
-        if config['eval_metrics']:
-            print(f"  test_accuracy: {config['eval_metrics'].get('test_accuracy', 'N/A'):.4f}")
-        if config['train_config']:
-            print(f"  epochs_trained: {config['train_config'].get('epochs_trained', 'N/A')}")
-            print(f"  best_val_accuracy: {config['train_config'].get('best_val_accuracy', 'N/A'):.4f}")
+        print(f"\n{'=' * 60}")
+        print("COMPLETE")
+        print(f"{'=' * 60}")
+        print(f"Shots: {self.statistics['total_shots_detected']}")
+        print(f"Made: {self.statistics['predicted_made']}")
+        print(f"Missed: {self.statistics['predicted_missed']}")
+        print(f"Output: {output_folder}")
         
-        return config
+        return output_folder, self.statistics
 
 
 # =============================================================================
-# MAIN EXECUTION
+# MAIN
 # =============================================================================
 if __name__ == "__main__":
-    # Configuration - UPDATE THESE PATHS
-    DATA_PATH = r"C:\Users\fridr\Documents\HooperAI\data\processed\annotations\basketball_shot_data_clean.csv"
-    MODEL_SAVE_PATH = r"C:\Users\fridr\Documents\HooperAI\data\model\basketball_shot_lstm.h5"
     
-    # Check if data file exists
-    if not os.path.exists(DATA_PATH):
-        print(f"ERROR: Data file not found: {DATA_PATH}")
-        exit(1)
+    YOLO_MODEL = r"C:\Users\fridr\Documents\HooperAI\data\model\basketball-detection-colab-yolo11s-best.pt"
+    LSTM_MODEL = r"C:\Users\fridr\Documents\HooperAI\data\model\basketball_shot_lstm_v2.keras"
+    SCALER_PATH = r"C:\Users\fridr\Documents\HooperAI\data\model\basketball_shot_lstm_v2_scaler.pkl"
+    CONFIG_PATH = r"C:\Users\fridr\Documents\HooperAI\data\model\basketball_shot_lstm_v2_config.pkl"
+    VIDEO_PATH = r"C:\Users\fridr\Documents\HooperAI\data\raw\videos\20250711_171647.mp4"
+    OUTPUT_DIR = r"C:\Users\fridr\Documents\HooperAI\data\processed\predictions"
     
-    # Initialize
     print("=" * 60)
-    print("BASKETBALL SHOT PREDICTION - LSTM TRAINING")
+    print("BASKETBALL SHOT PREDICTION")
     print("=" * 60)
     
-    shot_lstm = ShotPredictionLSTM(DATA_PATH)
+    print("\nChecking files...")
+    for name, path in [('YOLO', YOLO_MODEL), ('LSTM', LSTM_MODEL), 
+                       ('Scaler', SCALER_PATH), ('Config', CONFIG_PATH), ('Video', VIDEO_PATH)]:
+        status = "✅" if os.path.exists(path) else "❌"
+        print(f"  {status} {name}")
     
-    # Step 1: Load and prepare data
-    X_sequences, y_labels = shot_lstm.load_and_prepare_data()
-    
-    # Step 2: Prepare train/test split with augmentation
-    X_train, X_test, y_train, y_test = shot_lstm.prepare_train_test_split(
-        test_size=0.2, 
-        random_state=42,
-        augment=True
+    predictor = RealTimeShotPredictor(
+        yolo_model_path=YOLO_MODEL,
+        lstm_model_path=LSTM_MODEL,
+        scaler_path=SCALER_PATH,
+        config_path=CONFIG_PATH,
+        output_dir=OUTPUT_DIR
     )
     
-    # Step 3: Build model
-    model = shot_lstm.build_model(
-        lstm_units=128,
-        dropout_rate=0.4
-    )
-    
-    # Step 4: Train model
-    history = shot_lstm.train(
-        epochs=200,
-        batch_size=8,
-        patience=30
-    )
-    
-    # Step 5: Evaluate model
-    accuracy, y_pred, y_pred_proba = shot_lstm.evaluate()
-    
-    # Step 6: Plot training history
-    shot_lstm.plot_training_history()
-    
-    # Step 7: Save model, scaler, and config
-    config = shot_lstm.save_model(MODEL_SAVE_PATH)
-    
-    # Final summary
-    print("\n" + "=" * 60)
-    print("TRAINING COMPLETE")
-    print("=" * 60)
-    print(f"\nFiles saved:")
-    print(f"  - Model:        {MODEL_SAVE_PATH}")
-    print(f"  - Scaler:       {MODEL_SAVE_PATH.replace('.h5', '_scaler.pkl')}")
-    print(f"  - Config (pkl): {MODEL_SAVE_PATH.replace('.h5', '_config.pkl')}")
-    print(f"  - Config (json):{MODEL_SAVE_PATH.replace('.h5', '_config.json')}")
-    print(f"\nTest Accuracy: {accuracy:.4f}")
-    print("=" * 60)
+    predictor.process_video(VIDEO_PATH, display=True, save_video=True, verbose=True)
