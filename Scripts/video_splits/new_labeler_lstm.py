@@ -43,10 +43,10 @@ from ultralytics import YOLO
 # ─── configuration ────────────────────────────────────────────────────────────
 MODEL_PATH = r"C:\Users\fridr\Documents\HooperAI\data\model\yolo26m_best.pt"
 VIDEO_PATH = r"C:\Users\fridr\Documents\HooperAI\data\raw\videos\20250711_171647.mp4"
-OUTPUT_CSV = r"C:\Users\fridr\Documents\HooperAI\data\processed\annotations\basketball_shot_data_labeled_3103.csv"
+OUTPUT_CSV = r"C:\Users\fridr\Documents\HooperAI\data\processed\annotations\basketball_shot_data_labeled_11.04.csv"
 
 YOLO_CONF       = 0.75   # detection confidence threshold
-MIN_SHOT_FRAMES = 8      # discard shots shorter than this (too few timesteps for LSTM)
+MIN_SHOT_FRAMES = 22      # discard shots shorter than this (too few timesteps for LSTM)
 CONFIRM_FRAMES  = 10     # frames ball must stay elevated to confirm a real shot
 DISPLAY_WIDTH   = 1280
 # ─────────────────────────────────────────────────────────────────────────────

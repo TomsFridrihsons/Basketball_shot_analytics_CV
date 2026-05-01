@@ -35,7 +35,7 @@ DEFAULTS = {
     "scaler": r"C:\Users\fridr\Documents\HooperAI\data\model\basketball_shot_lstm_scaler.pkl",
     "config": r"C:\Users\fridr\Documents\HooperAI\data\model\basketball_shot_lstm_config.pkl",
     "video":  r"C:\Users\fridr\Documents\HooperAI\data\raw\videos\20260406_155804.mp4",
-    "output": r"C:\Users\fridr\Documents\HooperAI\data\processed\predictions",
+    "output": r"C:\Users\fridr\Documents\HooperAI\data\processed\predictions\2804",
 }
 
 # ── colour palette ────────────────────────────────────────────────────────────

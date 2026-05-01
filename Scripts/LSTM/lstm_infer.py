@@ -408,7 +408,7 @@ class RealTimeShotPredictor:
         if self.possible_shot and not self.actual_shot:
             self.poss_frame_count += 1
             if above:
-                if self.poss_frame_count >= 10:
+                if self.poss_frame_count >= 23:
                     self.actual_shot   = True
                     self.possible_shot = False
                     self.shot_data     = self.pre_data[:]
