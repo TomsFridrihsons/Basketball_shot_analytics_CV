@@ -17,8 +17,9 @@ export default function RootNavigator() {
   const [user, setUser] = useState(undefined);   // undefined = still restoring the session
   // Point the local cache at this account before any screen reads it
   useEffect(() => onUserChanged(async (u) => {
-    await setStorageOwner(u?.uid);
-    setUser(u);
+    try { await setStorageOwner(u?.uid); }
+    catch (e) { console.warn('setStorageOwner failed', e); }
+    finally { setUser(u); }   // never leave the app stuck on the spinner
   }), []);
 
   if (isFirebaseConfigured && user === undefined) {
