@@ -5,7 +5,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, font } from '../utils/theme';
 import SessionReview from '../components/SessionReview';
-import { getSession } from '../utils/storage';
+import { getSession, saveSession } from '../utils/storage';
 import * as api from '../services/api';
 
 // Reopen an analyzed session from Home to watch and label its shots.
@@ -22,8 +22,10 @@ export default function SessionScreen() {
       // Not stored on this phone (older app version / other device): load from the laptop
       try {
         const job = await api.job(sessionId);
-        setSession(job.result ? { id: sessionId, result: job.result, video: job.result.video,
-                                  localUri: null, timestamp: job.created } : null);
+        if (!job.result) { setSession(null); return; }
+        // keep a local copy so labels made here show up on Home / Stats
+        await saveSession(sessionId, job.result, { timestamp: job.created });
+        setSession(await getSession(sessionId));
       } catch (_) {
         setSession(null);
       }

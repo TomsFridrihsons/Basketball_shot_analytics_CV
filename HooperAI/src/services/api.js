@@ -3,6 +3,7 @@
 // signed in, otherwise with the API key from Settings (if any).
 // Upload with progress is part of the legacy API in SDK 54+ (still supported)
 import * as FileSystem from 'expo-file-system/legacy';
+import { AppState } from 'react-native';
 import { getSettings } from './settings';
 import { getIdToken } from './auth';
 
@@ -104,14 +105,39 @@ export async function uploadVideo(uri, onProgress) {
   return JSON.parse(res.body);
 }
 
-/** Poll a job until done. onProgress(fraction, statusText). Resolves with the result. */
+/** Wait `ms`, or less if the app comes back to the foreground (Android pauses
+ *  timers and network in the background). */
+function sleepOrWake(ms) {
+  return new Promise((resolve) => {
+    let sub = null;
+    const done = () => { clearTimeout(timer); sub?.remove(); resolve(); };
+    const timer = setTimeout(done, ms);
+    sub = AppState.addEventListener('change', (s) => { if (s === 'active') done(); });
+  });
+}
+
+/** Poll a job until done. onProgress(fraction | null, status) – status
+ *  'reconnecting' while the laptop is unreachable (the job keeps running there).
+ *  Resolves with the result. */
 export async function waitForJob(jobId, onProgress, isCancelled = () => false) {
+  let failures = 0;
   for (;;) {
     if (isCancelled()) throw new ApiError('cancelled', 0);
-    const j = await job(jobId);
+    let j;
+    try {
+      j = await job(jobId);
+      failures = 0;
+    } catch (e) {
+      // network drop / app in background: keep trying for up to ~1.5 h
+      if (e.status !== 0 || failures > 500) throw e;
+      failures += 1;
+      onProgress?.(null, 'reconnecting');
+      await sleepOrWake(Math.min(1000 * 2 ** Math.min(failures, 4), 10000));
+      continue;
+    }
     if (j.status === 'done') return j.result;
     if (j.status === 'error') throw new ApiError(j.error || 'Analysis failed', 500);
     onProgress?.(j.progress || 0, j.status);
-    await new Promise((r) => setTimeout(r, 1000));
+    await sleepOrWake(1000);
   }
 }

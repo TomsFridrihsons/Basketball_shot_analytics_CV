@@ -9,6 +9,7 @@ import { colors, radius, spacing, font } from '../utils/theme';
 import { Card, SectionLabel, Divider } from '../components';
 import { getShots, calcStats, calcZoneStats, calcModelStats } from '../utils/storage';
 import { getSettings } from '../services/settings';
+import { syncSessions } from '../services/sync';
 
 // ── Ring chart ───────────────────────────────────────────────────────────────
 function PctRing({ pct, size = 80 }) {
@@ -76,6 +77,7 @@ export default function StatsScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
+    await syncSessions();   // labels made on the laptop / other devices
     const data = await getShots();
     setShots(data);
     setStats(calcStats(data));
@@ -206,6 +208,6 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
   },
   modelKey: { fontSize: font.base, color: colors.textDim },
-  modelVal: { fontSize: font.base, color: colors.text, fontFamily: 'monospace' },
+  modelVal: { fontSize: font.base, color: colors.text, flexShrink: 1, textAlign: 'right' },
 
 });

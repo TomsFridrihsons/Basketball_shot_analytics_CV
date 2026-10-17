@@ -10,11 +10,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, radius, spacing, font } from '../utils/theme';
 import { Card } from '../components';
 import SessionReview from '../components/SessionReview';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { saveSession } from '../utils/storage';
 import * as api from '../services/api';
 
 // Flow: idle → recording → ready (have a clip) → uploading → analyzing → results
 // The video is uploaded in original quality; only results come back.
+
+const PENDING_KEY = 'hooperai_pending_job';   // analysis still running on the laptop
 
 const fmtTime = (s) => (s == null ? '' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`);
 const pct = (x) => `${Math.round(x * 100)}%`;
@@ -87,13 +90,28 @@ export default function RecordScreen() {
   }, []);
 
   useFocusEffect(useCallback(() => {
-    cancelled.current = false;
     checkServer();
     return () => {
-      cancelled.current = true;
       if (cameraRef.current && stageRef.current === 'recording') cameraRef.current.stopRecording();
     };
   }, [checkServer]));
+
+  // Keep following a job while the screen exists (tabs stay mounted); stop only on unmount.
+  useEffect(() => () => { cancelled.current = true; }, []);
+
+  // Resume an analysis that was still running when the screen/app was closed
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(PENDING_KEY);
+        if (raw && stageRef.current === 'idle') {
+          const p = JSON.parse(raw);
+          setClip({ uri: p.localUri, durationS: null, source: 'resumed' });
+          followJob(p.jobId, p.name, p.localUri);
+        }
+      } catch (_) { /* nothing to resume */ }
+    })();
+  }, []);
 
   // recording timer
   useEffect(() => {
@@ -156,22 +174,40 @@ export default function RecordScreen() {
       const { name } = await api.uploadVideo(clip.uri, setProgress);
       if (cancelled.current) return;
 
-      setStage('analyzing');
-      setProgress(0);
-      setProgressText('Waiting for the laptop…');
       const { job_id } = await api.analyze(name);
-      const res = await api.waitForJob(job_id, (p, st) => {
-        setProgress(p);
-        setProgressText(st === 'analyzing' ? 'Detecting shots…' : `${st[0].toUpperCase()}${st.slice(1)}…`);
-      }, () => cancelled.current);
-
-      await saveSession(job_id, res, { localUri: clip.uri });
-      setSession({ id: job_id, result: res, video: name, localUri: clip.uri });
-      setStage('results');
+      await AsyncStorage.setItem(PENDING_KEY, JSON.stringify({ jobId: job_id, name, localUri: clip.uri }));
+      await followJob(job_id, name, clip.uri);
     } catch (e) {
       if (e.message === 'cancelled') return;
       setStage('ready');
       Alert.alert('Analysis failed', e.message);
+    }
+  };
+
+  /** Poll the laptop until the job is done, then open the review. */
+  const followJob = async (jobId, name, localUri) => {
+    setStage('analyzing');
+    setProgress(0);
+    setProgressText('Waiting for the laptop…');
+    try {
+      const res = await api.waitForJob(jobId, (p, st) => {
+        if (p != null) setProgress(p);
+        setProgressText(
+          st === 'reconnecting' ? 'Connection lost – reconnecting (the laptop keeps working)…'
+          : st === 'analyzing' ? 'Detecting shots…'
+          : `${st[0].toUpperCase()}${st.slice(1)}…`);
+      }, () => cancelled.current);
+      await AsyncStorage.removeItem(PENDING_KEY);
+      await saveSession(jobId, res, { localUri });
+      setSession({ id: jobId, result: res, video: name, localUri });
+      setStage('results');
+    } catch (e) {
+      if (e.message === 'cancelled') return;   // unmounted – resumes next time
+      await AsyncStorage.removeItem(PENDING_KEY);
+      setStage(localUri ? 'ready' : 'idle');
+      Alert.alert('Analysis failed', e.status === 404
+        ? 'The laptop no longer has this job (was the server restarted?). Analyze the clip again.'
+        : e.message);
     }
   };
 
@@ -212,7 +248,13 @@ export default function RecordScreen() {
         <>
           {/* Viewfinder */}
           <View style={styles.viewfinder}>
-            {permission.granted ? (
+            {busy ? (
+              <View style={styles.noCam}>
+                <Ionicons name="hardware-chip-outline" size={44} color={colors.textGhost} />
+                <Text style={styles.noCamText}>Your laptop is analyzing the video</Text>
+                <Text style={styles.busyHint}>You can leave the app – it keeps going and resumes here.</Text>
+              </View>
+            ) : permission.granted ? (
               <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back"
                 mode="video" videoQuality="1080p" mute />
             ) : (
@@ -324,6 +366,7 @@ const styles = StyleSheet.create({
   },
   noCam: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md },
   noCamText: { fontSize: font.base, color: colors.textMuted },
+  busyHint: { fontSize: font.sm, color: colors.textDim, textAlign: 'center', paddingHorizontal: spacing.xl },
   permBtn: {
     backgroundColor: colors.orange,
     paddingHorizontal: spacing.lg,

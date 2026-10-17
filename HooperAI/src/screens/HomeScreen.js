@@ -9,7 +9,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, radius, spacing, font } from '../utils/theme';
 import { Card, SectionLabel, PrimaryButton, Divider } from '../components';
 import { getShots, getSessions, sessionSummary, formatTimeAgo, calcStats } from '../utils/storage';
-import * as api from '../services/api';
+import { syncSessions } from '../services/sync';
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
@@ -19,27 +19,19 @@ export default function HomeScreen() {
   const [stats, setStats] = useState({ total: 0, made: 0, missed: 0, pct: 0 });
   const [refreshing, setRefreshing] = useState(false);
 
-  const load = useCallback(async () => {
+  const readLocal = useCallback(async () => {
     const data = await getShots();
     setShots(data);
     setStats(calcStats(data));
     // sessions saved before review support have no result to open
-    const local = (await getSessions()).filter(s => s.result);
-    setSessions(local);
-    // Add sessions the laptop knows but this phone doesn't (older app version, other device)
-    try {
-      const known = new Set(local.map(s => s.id));
-      const remote = (await api.sessions())
-        .filter(s => !known.has(s.id))
-        .map(s => ({ id: s.id, timestamp: s.created, summary: {
-          total: s.total, made: s.made, labeled: s.labeled,
-          pct: s.total ? Math.round((s.made / s.total) * 100) : null,
-        } }));
-      if (remote.length) {
-        setSessions([...local, ...remote].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)));
-      }
-    } catch (_) { /* laptop offline: local sessions only */ }
+    setSessions((await getSessions()).filter(s => s.result));
   }, []);
+
+  // Show the local cache at once, then pull new/changed sessions from the laptop
+  const load = useCallback(async () => {
+    await readLocal();
+    if (await syncSessions()) await readLocal();
+  }, [readLocal]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -116,7 +108,7 @@ export default function HomeScreen() {
             </View>
           ) : (
             sessions.slice(0, 30).map((s, i, list) => {
-              const sum = s.result ? sessionSummary(s) : s.summary;
+              const sum = sessionSummary(s);
               const toReview = sum.total - sum.labeled;
               return (
                 <View key={s.id}>

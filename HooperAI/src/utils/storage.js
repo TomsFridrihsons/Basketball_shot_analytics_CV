@@ -32,7 +32,7 @@ export async function clearShots() {
 // ── Analyzed sessions (from the laptop server) ──────────────────────────────
 
 /** Shot record for the Home/Stats screens from a server shot. */
-function toShot(sessionId, s, fps) {
+function toShot(sessionId, s, fps, timestamp) {
   const labeled = s.label != null;
   const predicted = s.prediction === 1 ? 'made' : 'missed';
   const outcome = labeled ? (s.label === 1 ? 'made' : 'missed') : predicted;
@@ -48,28 +48,34 @@ function toShot(sessionId, s, fps) {
     confidence: Math.round(Math.max(s.probability, 1 - s.probability) * 100),
     videoTime: fps ? (s.start_frame - 1) / fps : null,
     zone: null,
-    timestamp: new Date().toISOString(),
+    timestamp,
   };
 }
 
 /** Store an analyzed session and its shots (replaces earlier copies of it).
- *  extra.localUri: the original clip on this phone, for review playback. */
+ *  extra.localUri: the original clip on this phone, for review playback.
+ *  extra.timestamp: when the session was analyzed (default: now / previous). */
 export async function saveSession(sessionId, result, extra = {}) {
   try {
+    const all = await getSessions();
+    const previous = all.find(s => s.id === sessionId);
+    const timestamp = extra.timestamp ?? previous?.timestamp ?? new Date().toISOString();
+
     const shots = (await getShots()).filter(s => s.sessionId !== sessionId);
-    const fresh = result.shots.map(s => toShot(sessionId, s, result.fps)).reverse();
-    const next = [...fresh, ...shots];
+    const fresh = result.shots.map(s => toShot(sessionId, s, result.fps, timestamp)).reverse();
+    const next = [...fresh, ...shots]
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     await AsyncStorage.setItem(SHOTS_KEY, JSON.stringify(next));
 
-    const sessions = (await getSessions()).filter(s => s.id !== sessionId);
-    const previous = (await getSessions()).find(s => s.id === sessionId);
-    sessions.unshift({
+    const sessions = all.filter(s => s.id !== sessionId);
+    sessions.push({
       id: sessionId,
       video: result.video,               // name on the laptop (for streaming it back)
       localUri: extra.localUri ?? previous?.localUri ?? null,   // original clip on this phone
       result,                            // full server result: shots, fps, labels
-      timestamp: previous?.timestamp ?? new Date().toISOString(),
+      timestamp,
     });
+    sessions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(sessions.slice(0, 100)));
     return next;
   } catch (e) {
