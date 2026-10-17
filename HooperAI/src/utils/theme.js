@@ -17,6 +17,8 @@ export const colors = {
   yellow:     '#c8a900',
   yellowFade: 'rgba(232,210,38,0.12)',
 
+  red:        '#ff453a',   // recording only
+
   white:      '#ffffff',
   text:       '#cccccc',
   // contrast on bgCard #161616 (WCAG): secondary 6.9:1, tertiary 5.2:1, ghost 3.4:1
@@ -43,8 +45,8 @@ export const spacing = {
 };
 
 export const font = {
-  xs:   10,
-  sm:   11,
+  xs:   11,   // HIG minimum on phones
+  sm:   12,
   base: 13,
   md:   15,
   lg:   18,
