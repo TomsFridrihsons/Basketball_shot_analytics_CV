@@ -103,7 +103,7 @@ def _analyze(client, headers=KEY, video="clip.mp4"):
     r = client.post("/api/analyze", json={"video": video}, headers=headers)
     assert r.status_code == 200, r.text
     job_id = r.json()["job_id"]
-    for _ in range(100):
+    for _ in range(600):   # up to 30 s: the laptop may be busy (Expo bundling, live server)
         job = client.get(f"/api/jobs/{job_id}", headers=headers).json()
         if job["status"] in ("done", "error"):
             return job_id, job

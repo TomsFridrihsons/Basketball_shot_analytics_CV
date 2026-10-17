@@ -153,7 +153,7 @@ cd HooperAI && npx expo start                      # app; Expo Go → exp://<lap
 
 ## 8. Ticket log (HPAI-XX)
 
-Next free ticket: **HPAI-32**. Workflow: `docs/WORKFLOW.md`.
+Next free ticket: **HPAI-33**. Workflow: `docs/WORKFLOW.md`.
 
 | Ticket | Type | Title | Status |
 |---|---|---|---|
@@ -188,6 +188,7 @@ Next free ticket: **HPAI-32**. Workflow: `docs/WORKFLOW.md`.
 | HPAI-29 | bugfix | Stats chart drawing: tick labels on their grid lines, bars spread across the width, time labels when all sessions are on one day; "You agreed with the model" wording | Done |
 | HPAI-30 | bugfix | "auth/already-initialized" render error after a hot reload / Expo restart: reuse the existing Firebase auth instance | Done |
 | HPAI-31 | feature | Delete Account asks for the password in a confirmation sheet and re-authenticates, instead of requiring sign out / sign in first | Done |
+| HPAI-32 | chore | Server tests wait up to 30 s for the fake analysis (5 s timed out once on a busy laptop) | Done |
 
 ---
 
