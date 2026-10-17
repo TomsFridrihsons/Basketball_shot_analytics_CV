@@ -51,6 +51,9 @@ RIM_FAR   = 3.0          # rim_offset outside the rim zone / clip value
 # Shot detection: frames the ball must stay above the players to confirm a shot.
 # Shared by shot_labeler.py and lstm_infer.py so both see the same shots.
 CONFIRM_FRAMES = 23
+# A confirmed shot ends when the ball has been missing this long (0.5 s at 30 fps):
+# after the rim it is often lost in the net or blurred and never seen coming down.
+SHOT_LOST_FRAMES = 15
 
 
 def shot_to_features(raw) -> np.ndarray:

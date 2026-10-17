@@ -372,6 +372,8 @@ class RealTimeShotPredictor:
         self.shot_start_frame  = None
         self.last_pred         = None
         self.last_prob         = None
+        self.shot_missing      = 0     # frames without ball/player during a confirmed shot
+        self.trim_tail         = 0     # trailing empty frames to drop when a shot is closed as lost
 
     def _reset_stats(self):
         self.stats = {
@@ -462,6 +464,15 @@ class RealTimeShotPredictor:
         poss_started = conf_started = ended = False
 
         if not ball_boxes or not player_boxes:
+            if self.actual_shot:
+                # The ball often vanishes after the rim (net, blur, out of frame):
+                # close the shot after SHOT_LOST_FRAMES instead of waiting forever.
+                self.shot_missing += 1
+                if self.shot_missing > sf.SHOT_LOST_FRAMES:
+                    self.actual_shot = False
+                    self.trim_tail   = self.shot_missing   # drop the empty frames
+                    ended            = True
+                return poss_started, conf_started, ended
             if self.possible_shot:
                 self.poss_frame_count += 1
                 if self.poss_frame_count > 25:
@@ -471,6 +482,7 @@ class RealTimeShotPredictor:
                     print("[POSSIBLE SHOT CANCELLED – no detections]")
             return poss_started, conf_started, ended
 
+        self.shot_missing = 0
         ball  = ball_boxes[0]
         b_bot = ball[3]
         b_ctr = (ball[1] + ball[3]) / 2
@@ -753,6 +765,58 @@ class RealTimeShotPredictor:
 
     # ── Video processing ──────────────────────────────────────────────────────
 
+    def _finish_shot(self, annotated, display: bool, video_path: str, verbose: bool):
+        """Predict the collected shot, record it in stats, ask for feedback (display mode)."""
+        end_frame = self.frame_idx
+        if self.trim_tail:
+            # shot was closed because the ball vanished: drop those empty frames
+            self.shot_data = self.shot_data[:-self.trim_tail] or self.shot_data
+            end_frame -= self.trim_tail
+            self.trim_tail = 0
+
+        pred, prob = self._predict()
+        self.last_pred = pred
+        self.last_prob = prob
+
+        if pred is not None:
+            result_txt  = "MADE" if pred == 1 else "MISSED"
+            conf_level  = self._confidence(prob)
+            if verbose:
+                print(f"  [SHOT #{self.stats['total_shots']+1}] "
+                      f"{result_txt}  prob={prob:.2%}  conf={conf_level}")
+
+            self.stats['total_shots'] += 1
+            self.stats['predicted_made' if pred else 'predicted_miss'] += 1
+            self.stats['high_conf' if conf_level == 'HIGH' else 'low_conf'] += 1
+
+            self.stats['shots'].append({
+                'shot_number':     self.stats['total_shots'],
+                'prediction':      int(pred),
+                'prediction_text': result_txt,
+                'probability':     round(prob, 4),
+                'confidence':      conf_level,
+                'start_frame':     self.shot_start_frame,
+                'end_frame':       end_frame,
+                'n_frames':        len(self.shot_data),
+            })
+            self.shot_frames[self.stats['total_shots']] = list(self.shot_data)
+
+            # ── Human feedback ────────────────────────────────────────────────
+            if display and self.feedback_csv and annotated is not None:
+                true_label = self._ask_feedback(
+                    annotated, pred, prob, self.stats['total_shots'])
+                if true_label is not None:
+                    agreement = "✅ correct" if true_label == pred else "❌ wrong"
+                    print(f"     Label: {'MADE' if true_label else 'MISSED'}"
+                          f"  ({agreement})")
+                    self._save_feedback_row(
+                        self.stats['total_shots'], true_label,
+                        pred, prob, video_path)
+                else:
+                    print("     [skipped]")
+
+        self.shot_data = []
+
     def process_video(self, video_path: str, display: bool = True,
                       save_video: bool = True, verbose: bool = True,
                       progress_cb=None):
@@ -870,48 +934,7 @@ class RealTimeShotPredictor:
 
             # Prediction at shot end
             if ended and self.shot_data:
-                pred, prob = self._predict()
-                self.last_pred = pred
-                self.last_prob = prob
-
-                if pred is not None:
-                    result_txt  = "MADE" if pred == 1 else "MISSED"
-                    conf_level  = self._confidence(prob)
-                    if verbose:
-                        print(f"  [SHOT #{self.stats['total_shots']+1}] "
-                              f"{result_txt}  prob={prob:.2%}  conf={conf_level}")
-
-                    self.stats['total_shots'] += 1
-                    self.stats['predicted_made' if pred else 'predicted_miss'] += 1
-                    self.stats['high_conf' if conf_level == 'HIGH' else 'low_conf'] += 1
-
-                    self.stats['shots'].append({
-                        'shot_number':     self.stats['total_shots'],
-                        'prediction':      int(pred),
-                        'prediction_text': result_txt,
-                        'probability':     round(prob, 4),
-                        'confidence':      conf_level,
-                        'start_frame':     self.shot_start_frame,
-                        'end_frame':       self.frame_idx,
-                        'n_frames':        len(self.shot_data),
-                    })
-                    self.shot_frames[self.stats['total_shots']] = list(self.shot_data)
-
-                    # ── Human feedback ────────────────────────────────────────
-                    if display and self.feedback_csv:
-                        true_label = self._ask_feedback(
-                            annotated, pred, prob, self.stats['total_shots'])
-                        if true_label is not None:
-                            agreement = "✅ correct" if true_label == pred else "❌ wrong"
-                            print(f"     Label: {'MADE' if true_label else 'MISSED'}"
-                                  f"  ({agreement})")
-                            self._save_feedback_row(
-                                self.stats['total_shots'], true_label,
-                                pred, prob, video_path)
-                        else:
-                            print("     [skipped]")
-
-                self.shot_data = []
+                self._finish_shot(annotated if not headless else None, display, video_path, verbose)
 
             if headless:
                 continue   # nothing to draw or show
@@ -963,6 +986,13 @@ class RealTimeShotPredictor:
                     idx = self.frame_idx          # keep frame numbering intact
                     self._reset_shot_state()
                     self.frame_idx = idx
+
+        # A shot still open when the video ends (ball never came back down) is
+        # still a shot: predict it instead of dropping it.
+        if self.actual_shot and self.shot_data:
+            self.actual_shot = False
+            self.trim_tail = self.shot_missing
+            self._finish_shot(None, False, video_path, verbose)
 
         # Cache detections only after a complete pass (not after pressing q)
         if new_cache is not None and reached_end and USE_DET_CACHE:
