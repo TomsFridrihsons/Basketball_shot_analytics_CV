@@ -119,6 +119,19 @@ export async function getSession(sessionId) {
   return (await getSessions()).find(s => s.id === sessionId) || null;
 }
 
+/** Keep only these sessions (and their shots) in this account's cache.
+ *  Resolves to the number removed. */
+export async function keepOnlySessions(ids) {
+  const keep = new Set(ids);
+  const sessions = await getSessions();
+  const kept = sessions.filter(s => keep.has(s.id));
+  if (kept.length === sessions.length) return 0;
+  const shots = (await getShots()).filter(s => keep.has(s.sessionId));
+  await AsyncStorage.setItem(sessionsKey(), JSON.stringify(kept));
+  await AsyncStorage.setItem(shotsKey(), JSON.stringify(shots));
+  return sessions.length - kept.length;
+}
+
 /** Summary numbers for a stored session (labels win over predictions). */
 export function sessionSummary(session) {
   return summarizeShots(session?.result?.shots || []);
