@@ -1,21 +1,24 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { currentUser } from '../services/auth';
 
-// Every account on this phone gets its own cache: keys end in the Firebase uid
-// ('local' when accounts are off). Set by RootNavigator before any screen loads.
-let owner = 'local';
-const LEGACY_KEYS = ['hooperai_shots', 'hooperai_sessions', 'hooperai_pending_job'];
-
-const scoped = (base) => `${base}_${owner}`;
+// Every account on this phone gets its own cache: keys end in the signed-in
+// Firebase uid ('local' when accounts are off), looked up on every access so a
+// key can never point at the previous account.
+const scoped = (base) => `${base}_${currentUser()?.uid || 'local'}`;
 const shotsKey = () => scoped('hooperai_shots');
 const sessionsKey = () => scoped('hooperai_sessions');
 export const pendingJobKey = () => scoped('hooperai_pending_job');
 
-/** Switch the cache to this account. The old shared cache can't be told apart by
- *  account, so it is dropped once – the laptop re-syncs each account's sessions. */
-export async function setStorageOwner(uid) {
-  owner = uid || 'local';
-  try { await AsyncStorage.multiRemove(LEGACY_KEYS); } catch (_) { /* nothing to drop */ }
+// The cache from before accounts were separated can't be split by account, so it
+// is dropped once; the laptop re-syncs each account's sessions.
+const LEGACY_KEYS = ['hooperai_shots', 'hooperai_sessions', 'hooperai_pending_job'];
+let legacyDropped = false;
+function dropLegacyCache() {
+  if (legacyDropped) return;
+  legacyDropped = true;
+  LEGACY_KEYS.forEach(k => AsyncStorage.removeItem(k).catch(() => {}));
 }
+dropLegacyCache();
 export const NOT_A_SHOT = -1;   // label for detections that were not real shots
 
 export async function saveShot(shot) {
