@@ -2,7 +2,7 @@
 
 Living record of what the project is, what was decided and why, what is done, and
 what is next. Update it in the same commit as any change that alters a decision,
-a result or the status below. Last updated: **2026-10-17** (HPAI-17).
+a result or the status below. Last updated: **2026-10-17** (HPAI-24).
 
 ---
 
@@ -63,6 +63,10 @@ phone ◄──────── shots, review, labels ────────
 | D12 | Labels: 1 made, 0 missed, **-1 not a shot** (→ `app_not_shots.csv`); users can **add missed shots** (frames rebuilt from cached detections) | False detections must not pollute made/missed training data; missed shots should still become training data | HPAI-14 |
 | D13 | Mobile app on **Expo SDK 57** (React Native 0.86, React 19, React Navigation 7, Firebase 13, expo-video) | Play Store Expo Go only runs the current SDK | HPAI-10 |
 | D14 | Portrait video is supported as-is | OpenCV auto-rotates; the earlier "no shots" was the lost-ball bug (D11), not orientation | HPAI-13 |
+| D15 | **Per-class thresholds: ball ≥ 0.35, basket/player ≥ 0.75**; YOLO cache stores all boxes ≥ 0.25 | Ball at 0.75 missed 20% of real shots; 0.25–0.50 all find 98% end to end | HPAI-18/24 |
+| D16 | **Default predictor = rim-pass rule on features v3** (track cleaning + parabola gap fill ≤ 1 s, threshold 0.40) | 96.7% unseen-video vs 92.9% for v2; trajectory judge gives identical end-to-end results, kept optional | HPAI-19/21/24 |
+| D17 | **Old start trigger (ball above players) stays default**; hoop-zone trigger + aim check behind `NEW_TRIGGER` | New trigger: 99.4% shots found but 17 false vs 3 – more total errors; needs a stricter aim/false-shot filter first | HPAI-20/24 |
+| D18 | Shot metrics (speed, release/entry angle, arc) shown only when `reliable` (gravity check 0.6–1.6 g) | Camera behind the shooter makes depth unknown; 80/184 shots pass | HPAI-22 |
 
 ---
 
@@ -76,6 +80,17 @@ Leave-one-video-out on 184 labeled shots from 4 videos (`python scripts/lstm/lst
 | LSTM v7 residual ensemble | 92.4% | **95.1%** |
 | LSTM v6 sequence only | 63.0% | 91.3% |
 | LSTM, old raw-pixel features | 53.8% | 87.0% |
+
+With features v3 (HPAI-19) the rule reaches **96.7%** on unseen video.
+
+End to end (YOLO → shot detector → made/missed) on `20250711_171647` (145 labeled shots)
++ app session 18:22 (18), `python scripts/lstm/eval_detection.py` (HPAI-24):
+
+| Setup | Shots found | False shots | Made/missed correct |
+|---|---|---|---|
+| Before (all ≥ 0.75, old trigger, rule v2) | 78.5% | 3 | 79.7% |
+| **Default now** (ball 0.35, old trigger, rule v3) | 95.1% | 3 | **91.6%** |
+| New trigger + aim check (rule v3 or judge) | **99.4%** | 17 | 92.0% |
 
 Speed: YOLO on GPU ~24 fps (1080p), CPU ~4 fps; cached re-analysis of a 6-min video
 ~27 s (vs 445 s). 145 of the 184 training shots come from a single video – more
@@ -137,7 +152,7 @@ cd HooperAI && npx expo start                      # app; Expo Go → exp://<lap
 
 ## 8. Ticket log (HPAI-XX)
 
-Next free ticket: **HPAI-24**. Workflow: `docs/WORKFLOW.md`.
+Next free ticket: **HPAI-25**. Workflow: `docs/WORKFLOW.md`.
 
 | Ticket | Type | Title | Status |
 |---|---|---|---|
@@ -158,12 +173,13 @@ Next free ticket: **HPAI-24**. Workflow: `docs/WORKFLOW.md`.
 | HPAI-15 | chore | `progress_context.md`, HPAI ticket workflow, release to `main` | Done |
 | HPAI-16 | chore | Plan: paid tiers, video retention, training-data collection (section 9) | Done |
 | HPAI-17 | chore | Detection roadmap (section 10): selected work + parked items | Done |
-| HPAI-18 | feature | Per-object confidence thresholds; detection cache keeps confidences; baseline evaluation | Planned |
-| HPAI-19 | feature | Better ball tracking: outlier cleaning, parabola gap filling, time-based (fps-independent) detector | Planned |
-| HPAI-20 | feature | New shot start trigger (hoop zone / leaves shooter) + aim check | Planned |
-| HPAI-21 | feature | Made/missed upgrades: parabola at rim height, ball hidden by the net, rim bounces | Planned |
-| HPAI-22 | feature | Measurement: rim-width scale, release speed, arc height, entry angle | Planned |
+| HPAI-18 | feature | Per-object confidence thresholds; detection cache keeps confidences; baseline evaluation | Done |
+| HPAI-19 | feature | Better ball tracking: outlier cleaning, parabola gap filling, time-based (fps-independent) detector | Done |
+| HPAI-20 | feature | New shot start trigger (hoop zone / leaves shooter) + aim check | Done |
+| HPAI-21 | feature | Made/missed upgrades: parabola at rim height, ball hidden by the net, rim bounces | Done |
+| HPAI-22 | feature | Measurement: rim-width scale, release speed, arc height, entry angle | Done |
 | HPAI-23 | feature | Home screen redesign (Apple HIG): "Today" hero with makes/attempts + shot-log dots, review prompt, labelled tab bar, WCAG-contrast text colours | Done |
+| HPAI-24 | fix | Detection defaults from the end-to-end eval: ball 0.35 / others 0.75, rule v3, old trigger | Done |
 
 ---
 
@@ -292,7 +308,7 @@ rim-width scale), Roboflow player identification (tracking, team clustering, jer
 numbers), court-keypoint homography papers (KaliCalib, Basketball-SORT, BasketTracking),
 pose-based form analysis (mc261670164/AI-basketball-analysis), TrackNet.
 
-### 10.1 Selected – in progress (owner, 2026-10-17)
+### 10.1 Selected – done, merged to development (owner, 2026-10-17)
 
 | Ticket | Improvement |
 |---|---|
@@ -306,6 +322,8 @@ Every step is measured before it is kept: (a) made/missed on the 184 labeled sho
 (leave-one-video-out), (b) end to end on `20250711_171647` (145 labeled shots) and the
 18:22 app session (18 labeled shots): shots found / missed / false, made-missed accuracy.
 After HPAI-18…22: **revisit the order of the remaining items** (owner).
+Open from this round: cut the new trigger's false shots (14 extra on the long video) so it
+can become the default; more labeled phone videos (only 18 shots today).
 
 ### 10.2 Parked – do not forget (owner: "leave B and C for later")
 

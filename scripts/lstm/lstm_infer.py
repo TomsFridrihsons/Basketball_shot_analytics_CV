@@ -56,7 +56,9 @@ OUTPUT_DIR  = str(PREDICTIONS_DIR)
 YOLO_CONF        = 0.75   # threshold for basket and player boxes (server: yolo_conf)
 BALL_CONF        = 0.35   # the ball is small and blurred: it scores lower (HPAI-18)
 CACHE_CONF       = 0.25   # YOLO runs at this level; per-class thresholds apply when reading
-NEW_TRIGGER      = True   # hoop-zone trigger + aim check (HPAI-20); False = above-players only
+# Hoop-zone trigger + aim check (HPAI-20). Off by default (HPAI-24): it finds 99% of shots
+# but adds ~6x more false ones (17 vs 3 on the eval videos) than the above-players trigger.
+NEW_TRIGGER      = False
 DISPLAY          = True   # show OpenCV window
 SAVE_VIDEO       = True   # write annotated video to output folder
 FEEDBACK_CSV     = str(ANNOTATIONS_DIR / "feedback_labels.csv")
