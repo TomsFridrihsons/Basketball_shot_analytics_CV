@@ -51,24 +51,27 @@ function Segmented({ value, onChange }) {
 }
 
 // ── FG% per session: fixed 0–100 axis, average line, latest session brightest ─
+const AXIS_W = 40;     // room for the tick labels on the right
+const PAD_T = 8;       // keeps the 100% label inside the card
+const TICK_H = 14;     // tick label line height, centred on its grid line
+
 function SessionChart({ data, average, width }) {
-  const plotW = Math.max(0, width - 36);          // room for the axis labels on the right
+  const plotW = Math.max(0, width - AXIS_W);
   const n = data.length;
-  const gap = n > 12 ? 3 : 6;
-  const barW = n ? Math.max(4, Math.min(28, (plotW - gap * (n - 1)) / n)) : 0;
-  const y = (pct) => CHART_H - (pct / 100) * CHART_H;
+  const slot = n ? plotW / n : 0;
+  const barW = Math.max(4, Math.min(28, slot * 0.6));
+  const y = (pct) => PAD_T + CHART_H - (pct / 100) * CHART_H;
   return (
     <View style={{ flexDirection: 'row' }}>
-      <Svg width={plotW} height={CHART_H}>
+      <Svg width={plotW} height={CHART_H + PAD_T}>
         {[0, 50, 100].map(t => (
-          <Line key={t} x1={0} x2={plotW} y1={y(t) + (t === 0 ? -0.5 : t === 100 ? 0.5 : 0)} y2={y(t) + (t === 0 ? -0.5 : t === 100 ? 0.5 : 0)}
-            stroke={colors.border} strokeWidth={1} />
+          <Line key={t} x1={0} x2={plotW} y1={y(t)} y2={y(t)} stroke={colors.border} strokeWidth={1} />
         ))}
         {data.map((d, i) => {
           const h = Math.max(2, (d.pct / 100) * CHART_H);
           return (
-            <Rect key={d.id} x={i * (barW + gap)} y={CHART_H - h} width={barW} height={h} rx={Math.min(4, barW / 2)}
-              fill={i === n - 1 ? colors.white : colors.textDim} />
+            <Rect key={d.id} x={i * slot + (slot - barW) / 2} y={y(0) - h} width={barW} height={h}
+              rx={Math.min(4, barW / 2)} fill={i === n - 1 ? colors.white : colors.textDim} />
           );
         })}
         {average != null && (
@@ -77,10 +80,11 @@ function SessionChart({ data, average, width }) {
         )}
       </Svg>
       {/* tick labels are visual only; the chart's label carries the data for VoiceOver */}
-      <View style={styles.axis} importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
-        <Text style={styles.axisText}>100%</Text>
-        <Text style={styles.axisText}>50%</Text>
-        <Text style={styles.axisText}>0%</Text>
+      <View style={{ width: AXIS_W, height: CHART_H + PAD_T }}
+        importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
+        {[100, 50, 0].map(t => (
+          <Text key={t} style={[styles.axisText, { top: y(t) - TICK_H / 2 }]}>{t}%</Text>
+        ))}
       </View>
     </View>
   );
@@ -164,11 +168,17 @@ export default function StatsScreen() {
 
   const model = calcModelStats(now);
   const fmtDay = ts => new Date(ts).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  const fmtTime = ts => new Date(ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const oneDay = bars.length > 0
+    && new Date(bars[0].timestamp).toDateString() === new Date(bars[bars.length - 1].timestamp).toDateString();
+  const when = ts => (oneDay ? fmtTime(ts) : fmtDay(ts));
+  const sinceText = bars.length ? (oneDay ? `since ${fmtTime(bars[0].timestamp)}` + (new Date(bars[0].timestamp).toDateString() === new Date().toDateString() ? ' today' : ` on ${fmtDay(bars[0].timestamp)}`)
+    : `since ${fmtDay(bars[0].timestamp)}`) : '';
 
   const chartTitle = bars.length < 2 ? null
-    : bars[bars.length - 1].pct > bars[0].pct ? `Up from ${bars[0].pct}% to ${bars[bars.length - 1].pct}% since ${fmtDay(bars[0].timestamp)}`
-    : bars[bars.length - 1].pct < bars[0].pct ? `Down from ${bars[0].pct}% to ${bars[bars.length - 1].pct}% since ${fmtDay(bars[0].timestamp)}`
-    : `Steady at ${bars[0].pct}% since ${fmtDay(bars[0].timestamp)}`;
+    : bars[bars.length - 1].pct > bars[0].pct ? `Up from ${bars[0].pct}% to ${bars[bars.length - 1].pct}% ${sinceText}`
+    : bars[bars.length - 1].pct < bars[0].pct ? `Down from ${bars[0].pct}% to ${bars[bars.length - 1].pct}% ${sinceText}`
+    : `Steady at ${bars[0].pct}% ${sinceText}`;
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -218,16 +228,16 @@ export default function StatsScreen() {
                   <View onLayout={e => setChartW(e.nativeEvent.layout.width)}
                     accessible accessibilityRole="image"
                     accessibilityLabel={`Bar chart of field goal percentage for ${bars.length} sessions. `
-                      + bars.map(b => `${fmtDay(b.timestamp)}: ${b.pct} percent`).join(', ')}>
+                      + bars.map(b => `${when(b.timestamp)}: ${b.pct} percent`).join(', ')}>
                     {chartW > 0 && <SessionChart data={bars} average={fg} width={chartW} />}
                   </View>
                   <View style={styles.legend} importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
-                    <Text style={styles.legendText}>{fmtDay(bars[0].timestamp)}</Text>
+                    <Text style={styles.legendText}>{when(bars[0].timestamp)}</Text>
                     <View style={styles.legendAvg}>
                       <View style={styles.dash} />
                       <Text style={styles.legendText}>average {fg}%</Text>
                     </View>
-                    <Text style={styles.legendText}>{fmtDay(bars[bars.length - 1].timestamp)}</Text>
+                    <Text style={styles.legendText}>{bars.length > 1 ? when(bars[bars.length - 1].timestamp) : ''}</Text>
                   </View>
                 </Card>
               </View>
@@ -238,7 +248,7 @@ export default function StatsScreen() {
               <Row label="Sessions" value={String(played.length)} />
               <Row label="Shots" value={String(now.length)} />
               <Row label="Shots per session" value={played.length ? String(Math.round(now.length / played.length)) : '–'} />
-              <Row label="Best session" value={best ? `${best.pct}% · ${fmtDay(best.timestamp)}` : '–'} last />
+              <Row label="Best session" value={best ? `${best.pct}% · ${when(best.timestamp)}` : '–'} last />
             </Card>
 
             {/* How you shoot */}
@@ -265,7 +275,7 @@ export default function StatsScreen() {
                 <Row label="Made / missed accuracy on new videos" value={settings.predictorAccuracy != null
                   ? `${Math.round(settings.predictorAccuracy * 100)}%` : '97%'} />
                 <Row label="Shots you reviewed" value={String(model.labeled)} />
-                <Row label="Model agreed with you" value={model.pct != null ? `${model.pct}%` : '–'} last />
+                <Row label="You agreed with the model" value={model.pct != null ? `${model.pct}%` : '–'} last />
               </Card>
               <Text style={[styles.note, { marginTop: spacing.sm, paddingHorizontal: 2 }]}>
                 {settings.predictorLabel || 'Rim-pass rule'} · reviewing shots makes these numbers more accurate.
@@ -302,9 +312,11 @@ const styles = StyleSheet.create({
   deltaText: { fontSize: font.base, color: colors.textMuted, fontWeight: '500' },
 
   chartTitle: { fontSize: font.md, fontWeight: '600', color: colors.white },
-  axis: { width: 36, height: CHART_H, justifyContent: 'space-between', alignItems: 'flex-end', marginTop: -6, marginBottom: -6 },
-  axisText: { fontSize: font.xs, color: colors.textDim, fontVariant: ['tabular-nums'] },
-  legend: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginRight: 36 },
+  axisText: {
+    position: 'absolute', right: 0, height: TICK_H, lineHeight: TICK_H,
+    fontSize: font.xs, color: colors.textDim, fontVariant: ['tabular-nums'],
+  },
+  legend: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginRight: AXIS_W },
   legendText: { fontSize: font.xs, color: colors.textDim },
   legendAvg: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   dash: { width: 14, borderTopWidth: 1.5, borderColor: colors.green, borderStyle: 'dashed' },
