@@ -184,7 +184,7 @@ Next free ticket: **HPAI-29**. Workflow: `docs/WORKFLOW.md`.
 | HPAI-25 | feature | Record + Session screens redesign (Apple HIG): full-bleed camera, one panel per state (permission, ready, offline, upload/analyze steps, done, error), review on the Session screen, 11 pt minimum text, red only for recording | Done |
 | HPAI-26 | feature | Stats screen redesign (Apple HIG charts): 7/30 days/All period, FG% with change vs previous period, FG% per session bar chart with average and VoiceOver summary, volume, average shot metrics (reliable shots only), detection trust card | Done |
 | HPAI-27 | feature | Settings + Login redesign (Apple HIG): grouped settings that save as you type, live laptop status, predictor checkmark list, in-app account deletion; login with labelled fields, show/hide password, disabled-until-valid button | Done |
-| HPAI-28 | bugfix | Accounts saw each other's data: phone cache scoped per Firebase uid (old shared cache dropped, re-synced from laptop); server records video owners and limits list/stream/analyze to them; /api/stats laptop-only | Done |
+| HPAI-28 | bugfix | Accounts saw each other's data: phone cache keyed by the signed-in Firebase uid (old shared cache dropped), sync keeps only the sessions the laptop lists for the account; server records video owners and limits list/stream/analyze to them; /api/stats laptop-only | Done |
 
 ---
 
