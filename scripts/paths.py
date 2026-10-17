@@ -23,10 +23,12 @@ ANNOTATIONS_DIR  = DATA_DIR / "processed" / "annotations"
 PREDICTIONS_DIR  = DATA_DIR / "processed" / "predictions"
 EVAL_DIR         = DATA_DIR / "processed" / "eval"
 EVALUATION_DIR   = DATA_DIR / "processed" / "evaluation"
+DETECTIONS_DIR   = DATA_DIR / "processed" / "detections"   # cached per-frame YOLO boxes
 ARCHIVE_MODEL_DIR = ROOT / "archives" / "models"
 
 # ── default models ───────────────────────────────────────────────────────────
 YOLO_MODEL = MODEL_DIR / "yolo26m-new-best.pt"
+RIM_RULE_CONFIG = MODEL_DIR / "basketball_shot_rim_rule_config.pkl"   # default made/missed predictor
 
 
 def lstm_artifacts(name: str, best: bool = True) -> dict:

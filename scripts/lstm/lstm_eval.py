@@ -49,13 +49,13 @@ import lstm_infer as infer
 # ─── CONFIGURATION ────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from paths import (YOLO_MODEL as _YOLO, RAW_VIDEO_DIR, ANNOTATIONS_DIR,  # noqa: E402
-                   EVAL_DIR, lstm_artifacts)
+                   EVAL_DIR, RIM_RULE_CONFIG, lstm_artifacts)
 
-_LSTM = lstm_artifacts("basketball_shot_lstm", best=False)
+_LSTM = lstm_artifacts("basketball_shot_lstm_v6")
 YOLO_MODEL  = str(_YOLO)
 LSTM_MODEL  = str(_LSTM["model"])
 SCALER_PATH = str(_LSTM["scaler"])
-CONFIG_PATH = str(_LSTM["config"])
+CONFIG_PATH = str(RIM_RULE_CONFIG)   # or _LSTM["config"] for the LSTM
 VIDEO_PATH  = str(RAW_VIDEO_DIR / "20250711_171647.mp4")
 GT_CSV      = str(ANNOTATIONS_DIR / "basketball_shot_data_labeled_3103.csv")
 OUTPUT_DIR  = str(EVAL_DIR)
@@ -568,11 +568,11 @@ if __name__ == "__main__":
     parser.add_argument("--config", default=CONFIG_PATH)
     args = parser.parse_args()
 
-    infer.YOLO_MODEL  = args.yolo
-    infer.LSTM_MODEL  = args.lstm
-    infer.SCALER_PATH = args.scaler
-    infer.CONFIG_PATH = args.config
-    infer.YOLO_CONF   = YOLO_CONF
+    # run_inference() reads these module globals, so the CLI overrides apply
+    YOLO_MODEL  = args.yolo
+    LSTM_MODEL  = args.lstm
+    SCALER_PATH = args.scaler
+    CONFIG_PATH = args.config
 
     evaluate(
         video_path = args.video,

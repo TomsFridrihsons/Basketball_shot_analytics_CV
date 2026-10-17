@@ -1,47 +1,63 @@
 """
-lstm_train.py  –  Basketball Shot Prediction: Fixed Training Script
-=======================================================================
-Fixes over v2:
-  BUG 1 – load_data: dfs list was never concat'd; only last CSV was used
-  BUG 2 – Data leakage: scaler was fit on full dataset before train/test split
-  BUG 3 – Attention: Flatten+softmax over padded zeros diluted real signal;
-           replaced with a proper masked attention (Dense → squeeze → masked softmax)
-  BUG 4 – Augmentation: np.roll wrapped zeros into real frames;
-           replaced with a clean left-shift that pads at the END only
-  BUG 5 – batch_size=8 is too small for BatchNorm; raised default to 32
-  EXTRA  – Lower default learning rate (1e-4) to prevent jumping to trivial solutions
-  EXTRA  – ReduceLROnPlateau callback added
-  EXTRA  – class_weight balancing added so majority class doesn't dominate
+lstm_train.py  –  Basketball Shot Prediction: Training + Honest Evaluation
+=========================================================================
+Fits the made/missed predictors on labeled shot CSVs (one CSV per video):
+  - rim-pass rule (default in lstm_infer.py): made if the ball drops through
+    rim height within `rim_threshold` basket widths of the rim centre.
+    One parameter, ~93% on unseen videos.
+  - LSTM v7 (residual on the rule): logit = a·rule_logit + b + correction, where
+    the correction comes from a BiLSTM + attention over the per-frame features and
+    the shot-level rim geometry (shot_features.shot_summary). The correction starts
+    at zero and is L2-penalised, so with little data the model stays close to the
+    rule and learns departures as labeled videos are added. 3 seeds averaged.
+
+Evaluation and data handling (fixes over v5):
+  - No leakage: shots are split into train / val / test FIRST; augmentation is
+    applied to the training shots only.
+  - Thresholds are fit on training data only, never on the test set.
+  - Cross-validation:
+      video – leave-one-video-out (each CSV is one video): how well the model
+              works on footage it has never seen. This is the number that matters.
+      shot  – stratified 5-fold over shots (same videos in train and test).
+  - Features v2 (scripts/shot_features.py): basket-relative, scale-free, gap
+    interpolation, smoothed velocity; same code is used by lstm_infer.py.
+  - Sequences keep the LAST 64 frames (the end of the shot decides the outcome)
+    instead of the first 260; scaler is fit on real frames only, then padded.
+  - Small model for ~200 shots; augmentation: noise, time shift, left↔right mirror.
+
+Usage:
+    python scripts/lstm/lstm_train.py                 # CV (video + shot) then train + save
+    python scripts/lstm/lstm_train.py --cv video      # only leave-one-video-out
+    python scripts/lstm/lstm_train.py --cv video --no-save
 """
 
 import os
+import sys
 import json
 import pickle
+import argparse
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import RobustScaler
-from sklearn.metrics import (classification_report,
-                             confusion_matrix,
-                             accuracy_score,
-                             f1_score)
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras import layers, regularizers
-from tensorflow.keras.callbacks import (EarlyStopping,
-                                        ModelCheckpoint,
-                                        ReduceLROnPlateau)
+from tensorflow.keras import layers
+from tensorflow.keras.callbacks import EarlyStopping
 
 # ─── paths ───────────────────────────────────────────────────────────────────
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from paths import ANNOTATIONS_DIR, MODEL_DIR  # noqa: E402
+import shot_features as sf  # noqa: E402
 
 DATA_PATHS = [
     str(ANNOTATIONS_DIR / "basketball_shot_data_labeled_04_05.csv"),
@@ -50,626 +66,400 @@ DATA_PATHS = [
     str(ANNOTATIONS_DIR / "basketball_shot_data_labeled_3103.csv"),
 ]
 MODEL_SAVE_DIR = str(MODEL_DIR)
-MODEL_NAME     = "basketball_shot_lstm_v5"
+MODEL_NAME     = "basketball_shot_lstm_v7"
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-# ── Custom layers ─────────────────────────────────────────────────────────────
-
-@keras.utils.register_keras_serializable()
-class SumAlongAxis(layers.Layer):
-    """Replaces Lambda(lambda x: tf.reduce_sum(x, axis=1)) for safe serialisation."""
-    def __init__(self, axis: int = 1, **kwargs):
-        super().__init__(**kwargs)
-        self.axis = axis
-
-    def call(self, x):
-        return tf.reduce_sum(x, axis=self.axis)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"axis": self.axis})
-        return config
+SEED       = 42
+N_SEEDS    = 3      # ensemble members (averaged)
+LSTM_UNITS = 24
+DROPOUT    = 0.4
+LR         = 1e-3
+EPOCHS     = 200
+PATIENCE   = 20
+BATCH_SIZE = 32
+VAL_FRAC   = 0.15
+CORR_L2    = 1e-2   # penalty on the LSTM correction's output weights
 
 
-@keras.saving.register_keras_serializable(package="Custom")
+# ── Custom layer (must match lstm_infer.py) ──────────────────────────────────
+
+@keras.utils.register_keras_serializable(package="Custom")
 class MaskedAttention(layers.Layer):
-    """
-    Proper masked attention.
-    Computes a scalar score per timestep, sets padded-frame scores to -inf
-    before softmax so they get ~0 weight, then returns weighted sum.
-
-    FIX FOR BUG 3: the old Flatten+softmax gave attention weight to zero-padded
-    frames, diluting the signal from real frames.
-    """
+    """Scalar score per timestep, padded frames get -inf before softmax, weighted sum."""
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.score_dense = layers.Dense(1, activation='tanh')
 
     def call(self, x, mask=None):
-        # x: (B, T, F)
-        scores = self.score_dense(x)          # (B, T, 1)
-        scores = tf.squeeze(scores, axis=-1)  # (B, T)
-
+        scores = tf.squeeze(self.score_dense(x), axis=-1)          # (B, T)
         if mask is not None:
-            # mask is bool (B, T); set padding positions to large negative
             mask_float = tf.cast(mask, tf.float32)
             scores = scores * mask_float + (1.0 - mask_float) * (-1e9)
+        weights = tf.expand_dims(tf.nn.softmax(scores, axis=-1), -1)  # (B, T, 1)
+        return tf.reduce_sum(x * weights, axis=1)                     # (B, F)
 
-        weights = tf.nn.softmax(scores, axis=-1)  # (B, T)
-        weights = tf.expand_dims(weights, axis=-1) # (B, T, 1)
-        context = tf.reduce_sum(x * weights, axis=1)  # (B, F)
-        return context
+    def compute_mask(self, x, mask=None):
+        return None   # time axis is reduced away; nothing to propagate
 
     def get_config(self):
         return super().get_config()
 
 
-# ── Loss function ─────────────────────────────────────────────────────────────
-
-def focal_loss(gamma: float = 2.0, alpha: float = 0.3):
-    def _loss(y_true, y_pred):
-        y_true  = tf.cast(y_true, tf.float32)
-        y_pred  = tf.clip_by_value(y_pred, 1e-7, 1 - 1e-7)
-        bce     = -y_true * tf.math.log(y_pred) - (1 - y_true) * tf.math.log(1 - y_pred)
-        p_t     = y_true * y_pred + (1 - y_true) * (1 - y_pred)
-        weight  = tf.pow(1 - p_t, gamma)
-        alpha_w = y_true * alpha + (1 - y_true) * (1 - alpha)
-        return tf.reduce_mean(alpha_w * weight * bce)
-    return _loss
-
-
-# ── Main class ────────────────────────────────────────────────────────────────
-
-class ShotPredictionLSTM:
-
-    FEATURE_COLS = [
-        'ball_x', 'ball_y', 'ball_w', 'ball_h',
-        'ball_velocity_x', 'ball_velocity_y',
-        'player_x', 'player_y', 'player_w', 'player_h',
-        'basket_x', 'basket_y', 'basket_w', 'basket_h',
-        'ball_player_dist', 'ball_basket_dist', 'ball_basket_angle',
-        'ball_above_player',
-    ]
-
-    def __init__(
-        self,
-        data_path:         str,
-        model_save_dir:    str,
-        model_name:        str   = "basketball_shot_lstm",
-        # architecture
-        lstm_units:        int   = 128,
-        dropout_rate:      float = 0.4,
-        l2_reg:            float = 0.001,
-        use_bidirectional: bool  = True,
-        use_attention:     bool  = True,
-        # focal loss
-        focal_gamma:       float = 2.0,
-        focal_alpha:       float = 0.3,
-        # training
-        test_size:         float = 0.2,
-        random_state:      int   = 42,
-        augment:           bool  = True,
-        epochs:            int   = 800,
-        batch_size:        int   = 32,   # FIX BUG 5: was 8, too small for BatchNorm
-        patience:          int   = 30,
-        learning_rate:     float = 1e-4, # EXTRA: lower default LR
-    ):
-        self.data_path         = data_path
-        self.model_save_dir    = model_save_dir
-        self.model_name        = model_name
-
-        self.lstm_units        = lstm_units
-        self.dropout_rate      = dropout_rate
-        self.l2_reg            = l2_reg
-        self.use_bidirectional = use_bidirectional
-        self.use_attention     = use_attention
-
-        self.focal_gamma       = focal_gamma
-        self.focal_alpha       = focal_alpha
-
-        self.test_size         = test_size
-        self.random_state      = random_state
-        self.augment           = augment
-        self.epochs            = epochs
-        self.batch_size        = batch_size
-        self.patience          = patience
-        self.learning_rate     = learning_rate
-
-        self.scaler       = RobustScaler()
-        self.model        = None
-        self.max_len      = None
-        self.history      = None
-        self.seq_stats    = {}
-        self.eval_metrics: dict = {}
-
-        os.makedirs(model_save_dir, exist_ok=True)
-
-    # ── 1. Data loading ───────────────────────────────────────────────────────
-
-    def load_data(self):
-        print("\n" + "=" * 60)
-        print("STEP 1 – LOADING DATA")
-        print("=" * 60)
-
-        # FIX BUG 1: was iterating but never calling pd.concat, so only
-        # the last file was used. Now we properly concatenate all files.
-        dfs = []
-        shot_offset = 0
-        for path in self.data_path:
-            sep = ';' if open(path).read(500).count(';') > open(path).read(500).count(',') else ','
-            df_file = pd.read_csv(path, sep=sep)
-
-            # Re-number shots so they don't collide across files
-            df_file['shot_number'] = df_file['shot_number'] + shot_offset
-            shot_offset += df_file['shot_number'].max() + 1
-
-            dfs.append(df_file)
-            print(f"  Loaded {os.path.basename(path)}: "
-                  f"{len(df_file)} rows, {df_file['shot_number'].nunique()} shots")
-
-        df = pd.concat(dfs, ignore_index=True)  # ← THE FIX
-        print(f"\n  Total rows after concat: {len(df)}")
-
-        shot_results = df.groupby('shot_number')['shot_result'].first()
-        made   = (shot_results == 1).sum()
-        missed = (shot_results == 0).sum()
-        print(f"  Made  : {made}  ({made/(made+missed)*100:.1f}%)")
-        print(f"  Missed: {missed}  ({missed/(made+missed)*100:.1f}%)")
-
-        if abs(made - missed) / (made + missed) > 0.2:
-            print("  ⚠️  Class imbalance detected – class_weight balancing will be applied.")
-
-        X_raw, y, shot_ids = [], [], []
-        for shot_num in df['shot_number'].unique():
-            shot_df  = df[df['shot_number'] == shot_num]
-            features = shot_df[self.FEATURE_COLS].fillna(0).values
-            label    = int(shot_df['shot_result'].iloc[0])
-            X_raw.append(features)
-            y.append(label)
-            shot_ids.append(shot_num)
-
-        lengths = [len(s) for s in X_raw]
-        self.seq_stats = {
-            'min_len':      int(min(lengths)),
-            'max_len':      int(max(lengths)),
-            'mean_len':     float(np.mean(lengths)),
-            'total_shots':  len(X_raw),
-            'made_shots':   int(sum(y)),
-            'missed_shots': int(len(y) - sum(y)),
-        }
-        print(f"\n  Seq length min/mean/max: "
-              f"{self.seq_stats['min_len']} / "
-              f"{self.seq_stats['mean_len']:.1f} / "
-              f"{self.seq_stats['max_len']}")
-
-        self._X_raw = X_raw
-        self._y     = np.array(y)
-        return X_raw, self._y
-
-    # ── 2. Padding ────────────────────────────────────────────────────────────
-
-    def _pad(self, X_raw, max_len=None):
-        if max_len is None:
-            max_len = max(len(s) for s in X_raw)
-        n_feat  = X_raw[0].shape[1]
-        X_pad   = np.zeros((len(X_raw), max_len, n_feat), dtype=np.float32)
-        for i, seq in enumerate(X_raw):
-            L = min(len(seq), max_len)
-            X_pad[i, :L, :] = seq[:L]
-        return X_pad, max_len
-
-    # ── 3. Augmentation ───────────────────────────────────────────────────────
-
-    def _augment(self, X_raw, y):
-        """
-        3× expansion per shot (applied to RAW sequences before padding):
-          - original
-          - gaussian noise (σ = 0.02)
-          - left-shift by 1–3 frames (truncates start, pads end with zeros)
-
-        FIX BUG 4: the old np.roll wrapped zero-padding from the end into the
-        beginning of the sequence, corrupting real frames and confusing masking.
-        We now shift on raw (unpadded) sequences and re-pad them normally,
-        so padding always appears only at the end.
-        """
-        Xa, ya = [], []
-        for seq, label in zip(X_raw, y):
-            Xa.append(seq)
-            ya.append(label)
-
-            # Gaussian noise variant
-            noise = np.random.normal(0, 0.02, seq.shape).astype(np.float32)
-            Xa.append(seq + noise)
-            ya.append(label)
-
-            # Left-shift variant: drop first `shift` frames
-            shift = np.random.randint(1, 4)
-            shifted = seq[shift:]  # shorter sequence – padding added later by _pad
-            if len(shifted) >= 3:  # only keep if still meaningful
-                Xa.append(shifted)
-                ya.append(label)
-
-        return Xa, np.array(ya)
-
-    # ── 4. Train / test split ─────────────────────────────────────────────────
-
-    def prepare_split(self):
-        print("\n" + "=" * 60)
-        print("STEP 2 – PREPARING TRAIN / TEST SPLIT")
-        print("=" * 60)
-
-        if self.augment:
-            print("  Applying 3× augmentation (noise + time-shift) on raw sequences…")
-            X_aug, y_aug = self._augment(self._X_raw, self._y)
-            print(f"  Augmented dataset: {len(X_aug)} sequences")
-        else:
-            X_aug = self._X_raw
-            y_aug = self._y
-
-        # Pad ALL sequences using global max_len
-        X_pad, self.max_len = self._pad(X_aug)
-        print(f"  max_len (post-aug): {self.max_len}")
-
-        # Split FIRST, then scale – FIX BUG 2
-        X_tr_raw, X_te_raw, y_tr, y_te = train_test_split(
-            X_pad, y_aug,
-            test_size    = self.test_size,
-            random_state = self.random_state,
-            stratify     = y_aug,
-        )
-
-        # FIX BUG 2: fit scaler ONLY on training data
-        n_tr, t, f = X_tr_raw.shape
-        self.scaler.fit(X_tr_raw.reshape(-1, f))
-
-        self.X_train = self.scaler.transform(X_tr_raw.reshape(-1, f)).reshape(n_tr, t, f)
-        n_te = X_te_raw.shape[0]
-        self.X_test  = self.scaler.transform(X_te_raw.reshape(-1, f)).reshape(n_te, t, f)
-        self.y_train = y_tr
-        self.y_test  = y_te
-
-        # Compute class weights for imbalanced datasets (EXTRA)
-        classes = np.unique(y_tr)
-        cw = compute_class_weight('balanced', classes=classes, y=y_tr)
-        self.class_weight = dict(zip(classes, cw))
-        print(f"  Class weights: {self.class_weight}")
-
-        print(f"  Train: {len(self.X_train)}   Test: {len(self.X_test)}")
-        print(f"  Seq length: {self.max_len}   Features: {f}")
-        return self.X_train, self.X_test, self.y_train, self.y_test
-
-    # ── 5. Model architecture ─────────────────────────────────────────────────
-
-    def build_model(self):
-        print("\n" + "=" * 60)
-        print("STEP 3 – BUILDING MODEL")
-        print("=" * 60)
-
-        n_feat = len(self.FEATURE_COLS)
-        reg    = regularizers.l2(self.l2_reg)
-        units  = self.lstm_units
-
-        inputs = layers.Input(shape=(self.max_len, n_feat), name="sequence_input")
-        x = layers.Masking(mask_value=0.0)(inputs)
-
-        # ── LSTM stack ──────────────────────────────────────────────────────
-        lstm1 = layers.LSTM(units, return_sequences=True,
-                            kernel_regularizer=reg, name="lstm_1")
-        x = (layers.Bidirectional(lstm1, name="bi_lstm_1")(x)
-             if self.use_bidirectional else lstm1(x))
-        x = layers.Dropout(self.dropout_rate)(x)  # removed BatchNorm here to reduce instability
-
-        lstm2 = layers.LSTM(units // 2, return_sequences=True,
-                            kernel_regularizer=reg, name="lstm_2")
-        x = (layers.Bidirectional(lstm2, name="bi_lstm_2")(x)
-             if self.use_bidirectional else lstm2(x))
-        x = layers.Dropout(self.dropout_rate)(x)
-
-        # ── Attention or final LSTM ──────────────────────────────────────────
-        if self.use_attention:
-            # FIX BUG 3: use proper masked attention instead of Flatten+softmax
-            x = MaskedAttention(name="masked_attention")(x)
-        else:
-            lstm3 = layers.LSTM(units // 4, return_sequences=False,
-                                 kernel_regularizer=reg, name="lstm_3")
-            x = (layers.Bidirectional(lstm3, name="bi_lstm_3")(x)
-                 if self.use_bidirectional else lstm3(x))
-            x = layers.Dropout(self.dropout_rate)(x)
-
-        # ── Dense head ───────────────────────────────────────────────────────
-        x = layers.Dense(64, activation='relu', kernel_regularizer=reg)(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.Dropout(self.dropout_rate)(x)
-
-        x = layers.Dense(32, activation='relu', kernel_regularizer=reg)(x)
-        x = layers.Dropout(self.dropout_rate / 2)(x)
-
-        outputs = layers.Dense(1, activation='sigmoid', name="shot_result")(x)
-
-        self.model = keras.Model(inputs, outputs, name="ShotPredictionLSTM_v3")
-        self.model.compile(
-            optimizer = keras.optimizers.Adam(learning_rate=self.learning_rate),
-            loss      = focal_loss(self.focal_gamma, self.focal_alpha),
-            metrics   = [
-                'accuracy',
-                keras.metrics.Precision(name='precision'),
-                keras.metrics.Recall(name='recall'),
-            ],
-        )
-
-        dir_tag = "Bidirectional" if self.use_bidirectional else "Unidirectional"
-        att_tag = "+ MaskedAttention" if self.use_attention else ""
-        print(f"  Architecture : {dir_tag} LSTM {att_tag}")
-        print(f"  Loss         : Focal (γ={self.focal_gamma}, α={self.focal_alpha})")
-        print(f"  LR           : {self.learning_rate}")
-        print(f"  L2 reg       : {self.l2_reg}")
-        self.model.summary()
-        return self.model
-
-    # ── 6. Training ──────────────────────────────────────────────────────────
-
-    def train(self):
-        print("\n" + "=" * 60)
-        print("STEP 4 – TRAINING")
-        print("=" * 60)
-
-        ckpt_path = os.path.join(self.model_save_dir, f"{self.model_name}_best.keras")
-
-        callbacks = [
-            EarlyStopping(
-                monitor              = 'val_loss',
-                patience             = self.patience,
-                restore_best_weights = True,
-                verbose              = 1,
-            ),
-            ModelCheckpoint(
-                filepath       = ckpt_path,
-                monitor        = 'val_loss',  # monitor loss not accuracy
-                save_best_only = True,
-                verbose        = 1,
-            ),
-            # EXTRA: reduce LR when training stalls
-            ReduceLROnPlateau(
-                monitor  = 'val_loss',
-                factor   = 0.5,
-                patience = 10,
-                min_lr   = 1e-6,
-                verbose  = 1,
-            ),
-        ]
-
-        self.history = self.model.fit(
-            self.X_train, self.y_train,
-            validation_split = 0.2,
-            epochs           = self.epochs,
-            batch_size       = self.batch_size,
-            callbacks        = callbacks,
-            class_weight     = self.class_weight,  # EXTRA: balance classes
-            verbose          = 1,
-        )
-
-        h = self.history.history
-        print(f"\n  Epochs trained    : {len(h['loss'])}")
-        print(f"  Best val accuracy : {max(h['val_accuracy']):.4f}")
-        print(f"  Best val loss     : {min(h['val_loss']):.4f}")
-        return self.history
-
-    # ── 7. Evaluation ─────────────────────────────────────────────────────────
-    def evaluate(self):
-        print("\n" + "=" * 60)
-        print("STEP 5 – EVALUATION")
-        print("=" * 60)
-
-        proba = self.model.predict(self.X_test, verbose=0).flatten()
-        pred = (proba > 0.5).astype(int)
-
-        acc = accuracy_score(self.y_test, pred)
-        cm = confusion_matrix(self.y_test, pred)
-        tn, fp, fn, tp = cm.ravel()
-
-        # Safe evaluation metrics protection against ZeroDivisionError
-        precision = float(tp / (tp + fp)) if (tp + fp) > 0 else 0.0
-        recall = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
-        f1 = float(2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
-
-        # Search for the optimal threshold based on F1-Score
-        thresholds = np.linspace(0.1, 0.9, 81)
-        best_thresh = 0.5
-        best_f1 = 0.0
-        for t in thresholds:
-            p = (proba > t).astype(int)
-            s = f1_score(self.y_test, p, zero_division=0)
-            if s > best_f1:
-                best_f1, best_thresh = s, t
-
-        # ── FIX 4: Don't save a broken optimal_threshold ─────────────────────────
-        unique_preds = len(np.unique((proba > best_thresh).astype(int)))
-        if unique_preds < 2:
-            print("⚠️  WARNING: Model predicts only one class — threshold search is meaningless.")
-            print("   Check your training data balance before deploying this model.")
-            best_thresh = 0.5  # fall back to neutral
-            # Recalculate best_f1 at the fallback neutral threshold
-            best_f1 = float(f1_score(self.y_test, (proba > 0.5).astype(int), zero_division=0))
-        # ─────────────────────────────────────────────────────────────────────────
-
-        print(f"\n  Test accuracy    : {acc:.4f}")
-        print(f"  Precision        : {precision:.4f}")
-        print(f"  Recall           : {recall:.4f}")
-        print(f"  F1 score         : {f1:.4f}")
-        print(f"  Optimal threshold: {best_thresh:.2f}  (F1 = {best_f1:.4f})")
-        print("\n  Classification report:")
-        print(classification_report(self.y_test, pred, target_names=['Missed', 'Made']))
-        print(f"\n  Confusion matrix:\n    TN={tn}  FP={fp}\n    FN={fn}  TP={tp}")
-
-        self.eval_metrics = {
-            'test_accuracy': float(acc),
-            'precision': float(precision),
-            'recall': float(recall),
-            'f1_score': float(f1),
-            'optimal_threshold': float(best_thresh),
-            'optimal_f1': float(best_f1),
-            'true_negatives': int(tn),
-            'false_positives': int(fp),
-            'false_negatives': int(fn),
-            'true_positives': int(tp),
-        }
-        return acc, pred, proba
-
-    # ── 8. Plot ───────────────────────────────────────────────────────────────
-
-    def plot_history(self, save_path: str = None):
-        if self.history is None:
-            print("No history – train first.")
-            return
-        if save_path is None:
-            save_path = os.path.join(self.model_save_dir, "training_history.png")
-
-        h   = self.history.history
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle("Training History", fontsize=16)
-
-        pairs = [
-            ('accuracy',  'val_accuracy',  'Accuracy'),
-            ('loss',      'val_loss',      'Loss'),
-            ('precision', 'val_precision', 'Precision'),
-            ('recall',    'val_recall',    'Recall'),
-        ]
-        for ax, (tr, va, title) in zip(axes.flat, pairs):
-            ax.plot(h[tr], label='Train')
-            ax.plot(h[va], label='Validation')
-            ax.set_title(title)
-            ax.set_xlabel('Epoch')
-            ax.legend()
-            ax.grid(True)
-
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"\n  Plot saved → {save_path}")
-        plt.show()
-
-    # ── 9. Save ───────────────────────────────────────────────────────────────
-
-    def save(self):
-        print("\n" + "=" * 60)
-        print("STEP 6 – SAVING")
-        print("=" * 60)
-
-        base        = os.path.join(self.model_save_dir, self.model_name)
-        model_path  = base + ".keras"
-        scaler_path = base + "_scaler.pkl"
-        cfg_pkl     = base + "_config.pkl"
-        cfg_json    = base + "_config.json"
-
-        self.model.save(model_path)
-        print(f"  Model  → {model_path}")
-
-        with open(scaler_path, 'wb') as f:
-            pickle.dump(self.scaler, f)
-        print(f"  Scaler → {scaler_path}")
-
-        h = self.history.history if self.history else {}
-        config = {
-            'max_len':            self.max_len,
-            'feature_cols':       self.FEATURE_COLS,
-            'n_features':         len(self.FEATURE_COLS),
-            'optimal_threshold':  self.eval_metrics.get('optimal_threshold', 0.5),
-            'model_config': {
-                'lstm_units':        self.lstm_units,
-                'dropout_rate':      self.dropout_rate,
-                'l2_reg':            self.l2_reg,
-                'use_bidirectional': self.use_bidirectional,
-                'use_attention':     self.use_attention,
-                'focal_gamma':       self.focal_gamma,
-                'focal_alpha':       self.focal_alpha,
-                'learning_rate':     self.learning_rate,
-                'optimizer':         'Adam',
-                'loss':              'focal_loss',
-            },
-            'seq_stats': self.seq_stats,
-            'training_config': {
-                'test_size':     self.test_size,
-                'random_state':  self.random_state,
-                'augment':       self.augment,
-                'n_train':       len(self.X_train),
-                'n_test':        len(self.X_test),
-                'epochs_run':    len(h.get('loss', [])),
-                'batch_size':    self.batch_size,
-                'patience':      self.patience,
-                'best_val_acc':  float(max(h['val_accuracy'])) if h else None,
-                'best_val_loss': float(min(h['val_loss']))     if h else None,
-            },
-            'eval_metrics':  self.eval_metrics,
-            'model_path':    model_path,
-            'scaler_path':   scaler_path,
-        }
-
-        with open(cfg_pkl, 'wb') as f:
-            pickle.dump(config, f)
-        with open(cfg_json, 'w') as f:
-            json.dump(config, f, indent=4)
-
-        print(f"  Config → {cfg_json}")
-        print(f"  Config → {cfg_pkl}")
-        print(f"\n  optimal_threshold : {config['optimal_threshold']:.3f}")
-        if self.eval_metrics:
-            print(f"  test_accuracy     : {self.eval_metrics['test_accuracy']:.4f}")
-            print(f"  f1_score          : {self.eval_metrics['f1_score']:.4f}")
-
-        return config
-
-    # ── Full pipeline ─────────────────────────────────────────────────────────
-
-    def run(self):
-        self.load_data()
-        self.prepare_split()
-        self.build_model()
-        self.train()
-        self.evaluate()
-        self.plot_history()
-        return self.save()
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Data ─────────────────────────────────────────────────────────────────────
+
+def load_shots(paths):
+    """One dict per shot: raw (T, 18) frames, label, group (= source video/CSV)."""
+    shots = []
+    for path in paths:
+        head = open(path).read(500)
+        df = pd.read_csv(path, sep=';' if head.count(';') > head.count(',') else ',')
+        stem = Path(path).stem
+        for _, shot_df in df.groupby('shot_number', sort=False):
+            # app_labeled.csv (scripts/app) mixes videos; group those by video
+            group = (f"{stem}:{shot_df['source_video'].iloc[0]}"
+                     if 'source_video' in shot_df else stem)
+            shots.append({
+                'raw':   shot_df[sf.RAW_COLS].to_numpy(dtype=np.float64),
+                'label': int(shot_df['shot_result'].iloc[0]),
+                'group': group,
+            })
+        n = sum(s['group'].split(':')[0] == stem for s in shots)
+        print(f"  {stem}: {n} shots")
+    labels = np.array([s['label'] for s in shots])
+    print(f"  Total: {len(shots)} shots  (made {labels.sum()}, missed {len(labels) - labels.sum()})")
+    return shots
+
+
+def featurize(shots):
+    return [sf.shot_to_features(s['raw']) for s in shots]
+
+
+def augment(seqs, labels, rng, mirror: bool = True):
+    out_x, out_y = [], []
+    for seq, y in zip(seqs, labels):
+        variants = [seq, seq + rng.normal(0, 0.02, seq.shape).astype(np.float32)]
+        shift = rng.integers(1, 4)
+        if len(seq) - shift >= 8:
+            variants.append(seq[shift:])
+        if mirror:
+            variants.append(sf.mirror(seq))
+        out_x += variants
+        out_y += [y] * len(variants)
+    return out_x, np.array(out_y)
+
+
+# ── Model (v7: sequence branch + shot-geometry branch) ───────────────────────
+
+RULE_TEMP = 0.1   # rule logit = (rim_threshold - rim_offset) / RULE_TEMP, clipped
+
+
+def build_member(max_len: int, n_feat: int, n_sum: int, seed: int) -> keras.Model:
+    """Residual model: logit = a * rule_logit + b + correction(sequence, summary).
+
+    The correction's output weights start at zero and carry an L2 penalty, so with
+    little data the model behaves like the rim-pass rule and only departs from it
+    where the frame sequence gives consistent evidence.
+    """
+    init = keras.initializers.GlorotUniform(seed=seed)
+    seq_in  = layers.Input(shape=(max_len, n_feat), name="sequence_input")
+    sum_in  = layers.Input(shape=(n_sum,), name="summary_input")
+    rule_in = layers.Input(shape=(1,), name="rule_input")
+
+    x = layers.Masking(mask_value=0.0)(seq_in)
+    x = layers.Bidirectional(layers.LSTM(LSTM_UNITS, return_sequences=True,
+                                         kernel_initializer=init))(x)
+    x = MaskedAttention()(x)
+    x = layers.Dropout(DROPOUT, seed=seed)(x)
+    x = layers.Dense(8, activation='relu', kernel_initializer=init)(x)
+    s = layers.Dense(8, activation='relu', kernel_initializer=init)(sum_in)
+    h = layers.Concatenate()([x, s])
+    correction = layers.Dense(1, kernel_initializer='zeros',
+                              kernel_regularizer=keras.regularizers.l2(CORR_L2),
+                              name="correction")(h)
+
+    base = layers.Dense(1, kernel_initializer='ones', bias_initializer='zeros',
+                        name="rule_calibration")(rule_in)
+    out = layers.Activation('sigmoid', name="prob")(layers.Add()([base, correction]))
+    model = keras.Model([seq_in, sum_in, rule_in], out)
+    model.compile(optimizer=keras.optimizers.Adam(LR),
+                  loss='binary_crossentropy', metrics=['accuracy'])
+    return model
+
+
+def ensemble(members) -> keras.Model:
+    """Average the members' outputs in one model (one file for lstm_infer.py)."""
+    ins = [layers.Input(shape=i.shape[1:], name=n)
+           for i, n in zip(members[0].inputs, ("sequence_input", "summary_input", "rule_input"))]
+    outs = [m(ins) for m in members]
+    out = layers.Average(name="shot_result")(outs) if len(outs) > 1 else outs[0]
+    return keras.Model(ins, out, name="ShotPredictionLSTM_v7")
+
+
+def rule_logit(seqs, rim_threshold):
+    off = np.array([sf.rim_pass_offset(s) for s in seqs], dtype=np.float32)
+    return np.clip((rim_threshold - off) / RULE_TEMP, -6, 6)[:, None]
+
+
+def _inputs(scalers, seqs, max_len):
+    X_seq = sf.pad_tail([scalers['seq'].transform(s).astype(np.float32) for s in seqs], max_len)
+    X_sum = scalers['summary'].transform(np.stack([sf.shot_summary(s) for s in seqs])).astype(np.float32)
+    return [X_seq, X_sum, rule_logit(seqs, scalers['rim_threshold'])]
+
+
+def fit(train_seqs, y_train, val_seqs, y_val, max_len=sf.MAX_LEN, verbose=0):
+    """Fit the rule threshold on the training shots, augment train only, fit
+    scalers on training data, train N_SEEDS residual members (early stopping on
+    val) and average them; decision threshold 0.5."""
+    rim_t = _best_rim_threshold(np.array([sf.rim_pass_offset(s) for s in train_seqs]),
+                                np.asarray(y_train))
+    rng = np.random.default_rng(SEED)
+    aug_x, aug_y = augment(train_seqs, y_train, rng)
+
+    scalers = {
+        'seq':           StandardScaler().fit(np.concatenate(aug_x)),
+        'summary':       StandardScaler().fit(np.stack([sf.shot_summary(s) for s in aug_x])),
+        'rim_threshold': rim_t,
+    }
+    X_tr, X_val = _inputs(scalers, aug_x, max_len), _inputs(scalers, val_seqs, max_len)
+
+    classes = np.unique(aug_y)
+    class_weight = dict(zip(classes, compute_class_weight('balanced', classes=classes, y=aug_y)))
+
+    members, histories = [], []
+    for k in range(N_SEEDS):
+        keras.utils.set_random_seed(SEED + k)
+        m = build_member(max_len, X_tr[0].shape[2], X_tr[1].shape[1], SEED + k)
+        histories.append(m.fit(
+            X_tr, aug_y, validation_data=(X_val, y_val),
+            epochs=EPOCHS, batch_size=BATCH_SIZE, class_weight=class_weight, verbose=verbose,
+            callbacks=[EarlyStopping(monitor='val_loss', patience=PATIENCE,
+                                     restore_best_weights=True)],
+        ))
+        members.append(m)
+
+    # The output is a calibrated logistic around the rule; tuning the cut-off on a
+    # ~25-shot val set (by F1) only pushed it toward "made" and added false positives.
+    return ensemble(members), scalers, 0.5, histories
+
+
+def predict(model, scalers, seqs, max_len=sf.MAX_LEN):
+    return model.predict(_inputs(scalers, seqs, max_len), verbose=0).ravel()
+
+
+# ── Metrics ──────────────────────────────────────────────────────────────────
+
+def metrics(y, prob, threshold):
+    pred = (prob > threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y, pred, labels=[0, 1]).ravel()
+    prec = tp / (tp + fp) if tp + fp else 0.0
+    rec = tp / (tp + fn) if tp + fn else 0.0
+    return {
+        'n': int(len(y)),
+        'accuracy':  float((tp + tn) / len(y)),
+        'precision': float(prec),
+        'recall':    float(rec),
+        'f1':        float(2 * prec * rec / (prec + rec)) if prec + rec else 0.0,
+        'tn': int(tn), 'fp': int(fp), 'fn': int(fn), 'tp': int(tp),
+    }
+
+
+def _fmt(m):
+    return (f"acc {m['accuracy']:.3f}  f1 {m['f1']:.3f}  "
+            f"prec {m['precision']:.3f}  rec {m['recall']:.3f}  "
+            f"(TN {m['tn']} FP {m['fp']} FN {m['fn']} TP {m['tp']}, n={m['n']})")
+
+
+# ── Evaluation protocols ─────────────────────────────────────────────────────
+
+def _val_split(idx, labels):
+    tr, val = train_test_split(idx, test_size=VAL_FRAC, random_state=SEED, stratify=labels[idx])
+    return tr, val
+
+
+def _folds(shots, mode):
+    labels = np.array([s['label'] for s in shots])
+    groups = np.array([s['group'] for s in shots])
+    idx = np.arange(len(shots))
+    if mode == 'video':
+        return [(idx[groups != g], idx[groups == g], g) for g in dict.fromkeys(groups)]
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+    return [(tr, te, f"fold {k + 1}") for k, (tr, te) in enumerate(skf.split(idx, labels))]
+
+
+def _rim_offsets(shots):
+    return np.array([sf.rim_pass_offset(sf.shot_to_features(s['raw'])) for s in shots])
+
+
+def _best_rim_threshold(offset, labels):
+    grid = np.linspace(0.1, 1.5, 29)
+    return float(max(grid, key=lambda g: ((offset < g) == labels).mean()))
+
+
+def save_rim_rule(shots, cv_results: dict):
+    """Fit the rule's single threshold on all shots and save a config lstm_infer.py can load."""
+    offset, labels = _rim_offsets(shots), np.array([s['label'] for s in shots])
+    t = _best_rim_threshold(offset, labels)
+    config = {
+        'model_type':        'rim_rule',
+        'feature_version':   sf.FEATURE_VERSION,
+        'rim_threshold':     t,
+        'optimal_threshold': 0.5,     # lstm_infer maps offset → score with 0.5 at rim_threshold
+        'max_len':           sf.MAX_LEN,
+        'feature_cols':      sf.FEATURE_COLS,
+        'train_metrics':     metrics(labels, (offset < t).astype(float), 0.5),
+        'cv_metrics':        {k: v for k, v in cv_results.items() if 'rim_rule' in k},
+        'data_paths':        [Path(p).name for p in DATA_PATHS],
+    }
+    base = os.path.join(MODEL_SAVE_DIR, "basketball_shot_rim_rule_config")
+    with open(base + ".pkl", 'wb') as f:
+        pickle.dump(config, f)
+    with open(base + ".json", 'w') as f:
+        json.dump(config, f, indent=4)
+    print(f"\n── Rim-pass rule: threshold {t:.2f} basket widths → {base}.pkl")
+    return config
+
+
+def rim_rule_cv(shots, mode: str):
+    """Baseline without learning: made if the ball drops through rim height within
+    `t` basket widths of the rim centre; `t` is picked on the training fold."""
+    offset = _rim_offsets(shots)
+    labels = np.array([s['label'] for s in shots])
+
+    print(f"\n── CV: {mode} (rim-pass rule baseline) " + "─" * 20)
+    all_y, all_pred = [], []
+    for train_idx, test_idx, name in _folds(shots, mode):
+        t = _best_rim_threshold(offset[train_idx], labels[train_idx])
+        pred = (offset[test_idx] < t).astype(float)
+        print(f"  {name:<45} thr {t:.2f}  {'':>11}{_fmt(metrics(labels[test_idx], pred, 0.5))}")
+        all_y.append(labels[test_idx])
+        all_pred.append(pred)
+    pooled = metrics(np.concatenate(all_y), np.concatenate(all_pred), 0.5)
+    print(f"  {'POOLED':<45} {'':>23}{_fmt(pooled)}")
+    return pooled
+
+
+def cross_validate(shots, mode: str):
+    """mode='video': leave-one-video-out; mode='shot': stratified 5-fold over shots.
+
+    Returns pooled metrics over all held-out predictions.
+    """
+    seqs = featurize(shots)
+    labels = np.array([s['label'] for s in shots])
+    folds = _folds(shots, mode)
+
+    print(f"\n── CV: {mode} (LSTM v7 residual, {N_SEEDS}-seed ensemble) " + "─" * 12)
+    all_y, all_prob, all_thr = [], [], []
+    for train_idx, test_idx, name in folds:
+        tr, val = _val_split(train_idx, labels)
+        model, scalers, thr, hists = fit([seqs[i] for i in tr], labels[tr],
+                                         [seqs[i] for i in val], labels[val])
+        prob = predict(model, scalers, [seqs[i] for i in test_idx])
+        m = metrics(labels[test_idx], prob, thr)
+        epochs = max(len(h.history['loss']) for h in hists)
+        print(f"  {name:<45} thr {thr:.2f}  epochs {epochs:>3}  {_fmt(m)}")
+        all_y.append(labels[test_idx])
+        all_prob.append(prob)
+        all_thr.append(np.full(len(test_idx), thr))
+        keras.backend.clear_session()
+
+    y, prob, thr = map(np.concatenate, (all_y, all_prob, all_thr))
+    pooled = metrics(y, (prob > thr).astype(float), 0.5)   # per-fold thresholds applied
+    print(f"  {'POOLED':<45} {'':>23}{_fmt(pooled)}")
+    return pooled
+
+
+# ── Final model ──────────────────────────────────────────────────────────────
+
+def train_final(shots, cv_results: dict, save: bool = True):
+    seqs = featurize(shots)
+    labels = np.array([s['label'] for s in shots])
+    tr, val = _val_split(np.arange(len(shots)), labels)
+
+    print(f"\n── Final model: train {len(tr)} shots, val {len(val)} shots " + "─" * 15)
+    model, scalers, thr, histories = fit([seqs[i] for i in tr], labels[tr],
+                                         [seqs[i] for i in val], labels[val], verbose=0)
+    val_m = metrics(labels[val], predict(model, scalers, [seqs[i] for i in val]), thr)
+    history = histories[0]
+    print(f"  epochs {[len(h.history['loss']) for h in histories]}  threshold {thr:.2f}")
+    print(f"  val: {_fmt(val_m)}")
+    model.summary()
+
+    if not save:
+        return None
+
+    os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
+    base = os.path.join(MODEL_SAVE_DIR, MODEL_NAME)
+    model.save(base + "_best.keras")
+    with open(base + "_scaler.pkl", 'wb') as f:
+        pickle.dump(scalers, f)      # {'seq', 'summary': StandardScaler, 'rim_threshold': float}
+
+    lengths = [len(s) for s in seqs]
+    config = {
+        'model_type':        'lstm_hybrid',
+        'feature_version':   sf.FEATURE_VERSION,
+        'max_len':           sf.MAX_LEN,
+        'feature_cols':      sf.FEATURE_COLS,
+        'raw_cols':          sf.RAW_COLS,
+        'n_features':        len(sf.FEATURE_COLS),
+        'summary_cols':      sf.SUMMARY_COLS,
+        'rule_temp':         RULE_TEMP,
+        'optimal_threshold': thr,
+        'model_config': {'lstm_units': LSTM_UNITS, 'dropout_rate': DROPOUT, 'n_seeds': N_SEEDS,
+                         'learning_rate': LR, 'loss': 'binary_crossentropy'},
+        'seq_stats': {'min_len': int(min(lengths)), 'max_len': int(max(lengths)),
+                      'mean_len': float(np.mean(lengths)), 'total_shots': len(seqs),
+                      'made_shots': int(labels.sum()), 'missed_shots': int(len(labels) - labels.sum())},
+        'training_config': {'data_paths': [Path(p).name for p in DATA_PATHS],
+                            'n_train': len(tr), 'n_val': len(val),
+                            'epochs_run': len(history.history['loss']), 'batch_size': BATCH_SIZE},
+        'val_metrics': val_m,
+        'cv_metrics':  cv_results,
+    }
+    with open(base + "_config.pkl", 'wb') as f:
+        pickle.dump(config, f)
+    with open(base + "_config.json", 'w') as f:
+        json.dump(config, f, indent=4)
+
+    h = history.history
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    for ax, key in zip(axes, ('loss', 'accuracy')):
+        ax.plot(h[key], label='train')
+        ax.plot(h[f'val_{key}'], label='val')
+        ax.set_title(key)
+        ax.set_xlabel('epoch')
+        ax.legend()
+        ax.grid(True)
+    fig.tight_layout()
+    fig.savefig(base + "_history.png", dpi=150)
+
+    print(f"\n  Saved → {base}_best.keras / _scaler.pkl / _config.pkl / _config.json / _history.png")
+    return config
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("BASKETBALL SHOT PREDICTION – TRAINING v3")
-    print("=" * 60)
+    ap = argparse.ArgumentParser(description="Fit the rim-pass rule and train the shot-outcome LSTM")
+    ap.add_argument("--cv", choices=["both", "video", "shot", "none"], default="both")
+    ap.add_argument("--no-save", action="store_true", help="skip training the final model")
+    args = ap.parse_args()
 
+    keras.utils.set_random_seed(SEED)
     for p in DATA_PATHS:
         if not os.path.exists(p):
-            print(f"ERROR: data file not found → {p}")
-            raise SystemExit(1)
+            raise SystemExit(f"ERROR: data file not found → {p}")
 
-    trainer = ShotPredictionLSTM(
-        data_path          = DATA_PATHS,
-        model_save_dir     = MODEL_SAVE_DIR,
-        model_name         = MODEL_NAME,
-        lstm_units         = 128,
-        dropout_rate       = 0.4,
-        l2_reg             = 0.001,
-        use_bidirectional  = True,
-        use_attention      = True,
-        focal_gamma        = 2.0,
-        focal_alpha        = 0.3,
-        test_size          = 0.2,
-        random_state       = 42,
-        augment            = True,
-        epochs             = 800,
-        batch_size         = 32,   # was 8
-        patience           = 30,
-        learning_rate      = 1e-4, # was 1e-3
-    )
-
-    config = trainer.run()
-
-    print("\n" + "=" * 60)
-    print("TRAINING COMPLETE")
     print("=" * 60)
-    print(f"  Model   : {config['model_path']}")
-    print(f"  Scaler  : {config['scaler_path']}")
-    print(f"  F1      : {config['eval_metrics']['f1_score']:.4f}")
-    print(f"  Acc     : {config['eval_metrics']['test_accuracy']:.4f}")
-    print(f"  Thresh  : {config['optimal_threshold']:.3f}")
+    print("BASKETBALL SHOT PREDICTION – TRAINING v7")
     print("=" * 60)
+    shots = load_shots(DATA_PATHS)
+
+    modes = {"both": ["video", "shot"], "none": []}.get(args.cv, [args.cv])
+    cv_results = {}
+    for mode in modes:
+        cv_results[f"{mode}_rim_rule"] = rim_rule_cv(shots, mode)
+        cv_results[mode] = cross_validate(shots, mode)
+
+    if not args.no_save:
+        save_rim_rule(shots, cv_results)
+        train_final(shots, cv_results)

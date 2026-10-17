@@ -26,6 +26,7 @@ from datetime import datetime
 import cv2
 import numpy as np
 import pandas as pd
+import torch
 from ultralytics import YOLO
 
 import tensorflow as tf
@@ -38,13 +39,14 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from paths import (YOLO_MODEL as _YOLO, RAW_VIDEO_DIR, PREDICTIONS_DIR,  # noqa: E402
-                   ANNOTATIONS_DIR, lstm_artifacts)
+                   ANNOTATIONS_DIR, DETECTIONS_DIR, RIM_RULE_CONFIG, lstm_artifacts)
+import shot_features as sf  # noqa: E402
 
-_LSTM = lstm_artifacts("basketball_shot_lstm_v3")
+_LSTM = lstm_artifacts("basketball_shot_lstm_v6")
 YOLO_MODEL  = str(_YOLO)
-LSTM_MODEL  = str(_LSTM["model"])
+LSTM_MODEL  = str(_LSTM["model"])     # ignored when CONFIG_PATH is a rim-rule config
 SCALER_PATH = str(_LSTM["scaler"])
-CONFIG_PATH = str(_LSTM["config"])
+CONFIG_PATH = str(RIM_RULE_CONFIG)   # default predictor; use _LSTM["config"] for the LSTM
 VIDEO_PATH  = str(RAW_VIDEO_DIR / "20250711_171647.mp4")
 OUTPUT_DIR  = str(PREDICTIONS_DIR)
 
@@ -52,6 +54,7 @@ YOLO_CONF        = 0.75   # YOLO detection confidence threshold
 DISPLAY          = True   # show OpenCV window
 SAVE_VIDEO       = True   # write annotated video to output folder
 FEEDBACK_CSV     = str(ANNOTATIONS_DIR / "feedback_labels.csv")
+USE_DET_CACHE    = True   # reuse cached YOLO boxes on headless runs (display/save off)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -71,6 +74,9 @@ class MaskedAttention(layers.Layer):
         weights = tf.nn.softmax(scores, axis=-1)
         weights = tf.expand_dims(weights, axis=-1)
         return tf.reduce_sum(x * weights, axis=1)
+
+    def compute_mask(self, x, mask=None):
+        return None   # time axis is reduced away; nothing to propagate
 
     def get_config(self):
         return super().get_config()
@@ -247,7 +253,13 @@ class RealTimeShotPredictor:
             raise FileNotFoundError(f"YOLO model not found: {yolo_path}")
         print("\nLoading YOLO …")
         self.yolo = YOLO(yolo_path)
-        print(f"  ✅ {yolo_path}")
+        self.yolo_path = yolo_path
+        self.device = 0 if torch.cuda.is_available() else 'cpu'
+        self.half   = self.device != 'cpu'      # FP16 on GPU: ~2x faster, same boxes
+        print(f"  ✅ {yolo_path}  (device: {'cuda' if self.half else 'cpu'})")
+        if not self.half:
+            print("  ⚠️  CUDA not available – YOLO runs on CPU (slow). "
+                  "Install a CUDA build of PyTorch that matches your driver.")
 
         # ── Config ───────────────────────────────────────────────────────────
         if not os.path.exists(config_path):
@@ -258,58 +270,70 @@ class RealTimeShotPredictor:
         self.max_seq_len       = self.config.get('max_len', 68)
         self.feature_cols      = self.config.get('feature_cols', self.FEATURE_COLS)
         self.optimal_threshold = self.config.get('optimal_threshold', 0.5)
+        # v2 models (lstm_train.py v6+) build features with shot_features.py;
+        # older models take the raw pixel columns directly.
+        self.feature_version   = self.config.get('feature_version', 1)
 
-        # ─── 2. LOAD LSTM MODEL ───────────────────────────────────────────────
-        print("Loading LSTM …")
-
-        def focal_loss(gamma=2.0, alpha=0.25):
-            def _loss(y_true, y_pred):
-                y_true = tf.cast(y_true, tf.float32)
-                bce = keras.losses.binary_crossentropy(y_true, y_pred, from_logits=False)
-                p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
-                alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
-                modulating_factor = tf.pow(1.0 - p_t, gamma)
-                return tf.reduce_mean(alpha_factor * modulating_factor * bce)
-
-            return _loss
-
-        try:
-            # Clean direct loading: Forces Keras to parse the model structure
-            # exactly as it was compiled during training.
-            # FIXED: Assigned directly to self.lstm to match downstream inference calls
-            self.lstm = keras.models.load_model(
-                lstm_path,
-                custom_objects={
-                    "MaskedAttention": MaskedAttention,
-                    "_loss": focal_loss()
-                },
-                compile=False
-            )
-            print(f"   ✅ Model loaded cleanly via serialization from: {lstm_path}")
-
-        except Exception as e:
-            print(f"   ⚠️ Direct structural load failed: {e}")
-            print("   Falling back to manual layer-by-layer reconstruction...")
-
-            # Legacy fallback if your file was saved using old weights format
-            self.lstm = _rebuild_model(self.max_len, n_features, self.cfg)
-
-            # Attempt to safely load weights onto the rebuilt structure
-            try:
-                self.lstm.load_weights(lstm_path, skip_mismatch=True)
-                print("   ✅ Weights mounted successfully via legacy reconstruction path.")
-            except Exception as weight_err:
-                print(f"   ❌ Fatal error loading weights to structure: {weight_err}")
-                raise weight_err
-        # ── Scaler ───────────────────────────────────────────────────────────
-        if scaler_path and os.path.exists(scaler_path):
-            with open(scaler_path, 'rb') as f:
-                self.scaler = pickle.load(f)
-            fitted = hasattr(self.scaler, 'center_') or hasattr(self.scaler, 'mean_')
-            print(f"\n  ✅ Scaler loaded ({'fitted' if fitted else 'NOT FITTED – predictions will be off'})")
+        # Rim-pass rule configs (lstm_train.py) need no network or scaler
+        self.model_type = self.config.get('model_type', 'lstm')
+        if self.model_type == 'rim_rule':
+            self.lstm = self.scaler = None
+            self.rim_threshold = self.config['rim_threshold']
+            print(f"\n  ✅ Rim-pass rule (made if rim offset < {self.rim_threshold:.2f} basket widths)")
         else:
-            self.scaler = None
-            print("\n  ⚠️  No scaler found – predictions will be inaccurate!")
+            # ─── 2. LOAD LSTM MODEL ───────────────────────────────────────────────
+            print("Loading LSTM …")
+
+            def focal_loss(gamma=2.0, alpha=0.25):
+                def _loss(y_true, y_pred):
+                    y_true = tf.cast(y_true, tf.float32)
+                    bce = keras.losses.binary_crossentropy(y_true, y_pred, from_logits=False)
+                    p_t = (y_true * y_pred) + ((1 - y_true) * (1 - y_pred))
+                    alpha_factor = y_true * alpha + (1 - y_true) * (1 - alpha)
+                    modulating_factor = tf.pow(1.0 - p_t, gamma)
+                    return tf.reduce_mean(alpha_factor * modulating_factor * bce)
+
+                return _loss
+
+            try:
+                # Clean direct loading: Forces Keras to parse the model structure
+                # exactly as it was compiled during training.
+                # FIXED: Assigned directly to self.lstm to match downstream inference calls
+                self.lstm = keras.models.load_model(
+                    lstm_path,
+                    custom_objects={
+                        "MaskedAttention": MaskedAttention,
+                        "_loss": focal_loss()
+                    },
+                    compile=False
+                )
+                print(f"   ✅ Model loaded cleanly via serialization from: {lstm_path}")
+
+            except Exception as e:
+                print(f"   ⚠️ Direct structural load failed: {e}")
+                print("   Falling back to manual layer-by-layer reconstruction...")
+
+                # Legacy fallback if your file was saved using old weights format
+                self.lstm = _rebuild_model(self.max_seq_len, len(self.feature_cols),
+                                           self.config.get('model_config', {}))
+
+                # Attempt to safely load weights onto the rebuilt structure
+                try:
+                    self.lstm.load_weights(lstm_path, skip_mismatch=True)
+                    print("   ✅ Weights mounted successfully via legacy reconstruction path.")
+                except Exception as weight_err:
+                    print(f"   ❌ Fatal error loading weights to structure: {weight_err}")
+                    raise weight_err
+            # ── Scaler ───────────────────────────────────────────────────────────
+            if scaler_path and os.path.exists(scaler_path):
+                with open(scaler_path, 'rb') as f:
+                    self.scaler = pickle.load(f)
+                parts = self.scaler.values() if isinstance(self.scaler, dict) else [self.scaler]
+                fitted = all(hasattr(s, 'center_') or hasattr(s, 'mean_') for s in parts)
+                print(f"\n  ✅ Scaler loaded ({'fitted' if fitted else 'NOT FITTED – predictions will be off'})")
+            else:
+                self.scaler = None
+                print("\n  ⚠️  No scaler found – predictions will be inaccurate!")
 
         # ── Output ───────────────────────────────────────────────────────────
         self.output_base = output_dir
@@ -466,7 +490,7 @@ class RealTimeShotPredictor:
         if self.possible_shot and not self.actual_shot:
             self.poss_frame_count += 1
             if above:
-                if self.poss_frame_count >= 23:
+                if self.poss_frame_count >= sf.CONFIRM_FRAMES:
                     self.actual_shot   = True
                     self.possible_shot = False
                     self.shot_data     = self.pre_data[:]
@@ -589,23 +613,55 @@ class RealTimeShotPredictor:
             print(f"[WARNING] Only {len(self.shot_data)} frames – skipping prediction")
             return None, None
 
-        seq = np.array(self.shot_data, dtype=np.float32)
-        seq = np.nan_to_num(seq, nan=0.0)
+        if self.model_type == 'rim_rule':
+            offset = sf.rim_pass_offset(sf.shot_to_features(np.array(self.shot_data, dtype=np.float64)))
+            # Map the offset to a 0–1 score; 0.5 exactly at the threshold
+            prob  = float(1.0 / (1.0 + np.exp((offset - self.rim_threshold) / 0.1)))
+            label = 1 if prob >= self.optimal_threshold else 0
+            print(f"  Rim offset : {offset:.3f}  (threshold {self.rim_threshold:.2f})")
+            print(f"  Prediction : {'MADE' if label else 'MISSED'}")
+            return label, prob
 
-        n_feat = len(self.feature_cols)
-        padded = np.zeros((1, self.max_seq_len, n_feat), dtype=np.float32)
-        L      = min(len(seq), self.max_seq_len)
-        padded[0, :L, :] = seq[:L]
+        if self.model_type == 'lstm_hybrid':
+            # v7: [scaled frame sequence, scaled shot-geometry summary, rule logit]
+            feats  = sf.shot_to_features(np.array(self.shot_data, dtype=np.float64))
+            seq    = self.scaler['seq'].transform(feats).astype(np.float32)
+            summ   = self.scaler['summary'].transform(sf.shot_summary(feats)[None]).astype(np.float32)
+            rule   = np.clip((self.scaler['rim_threshold'] - sf.rim_pass_offset(feats))
+                             / self.config.get('rule_temp', 0.1), -6, 6)
+            rule   = np.array([[rule]], dtype=np.float32)
+            prob   = float(self.lstm([sf.pad_tail([seq], self.max_seq_len), summ, rule],
+                                     training=False).numpy()[0][0])
+            label  = 1 if prob >= self.optimal_threshold else 0
+            print(f"  Raw prob   : {prob:.4f}  (threshold {self.optimal_threshold:.3f})")
+            print(f"  Prediction : {'MADE' if label else 'MISSED'}")
+            return label, prob
 
-        # Scale
-        if self.scaler is not None:
-            is_fitted = hasattr(self.scaler, 'center_') or hasattr(self.scaler, 'mean_')
-            if is_fitted:
-                flat   = padded.reshape(-1, n_feat)
-                flat   = self.scaler.transform(flat)
-                padded = flat.reshape(1, self.max_seq_len, n_feat)
+        if self.feature_version >= 2:
+            # Same transform as training: features → scale real frames → tail-pad
+            seq = sf.shot_to_features(np.array(self.shot_data, dtype=np.float64))
+            if self.scaler is not None:
+                seq = self.scaler.transform(seq).astype(np.float32)
+            padded = sf.pad_tail([seq], self.max_seq_len)
+        else:
+            seq = np.array(self.shot_data, dtype=np.float32)
+            seq = np.nan_to_num(seq, nan=0.0)
 
-        prob  = float(self.lstm.predict(padded, verbose=0)[0][0])
+            n_feat = len(self.feature_cols)
+            padded = np.zeros((1, self.max_seq_len, n_feat), dtype=np.float32)
+            L      = min(len(seq), self.max_seq_len)
+            padded[0, :L, :] = seq[:L]
+
+            # Scale
+            if self.scaler is not None:
+                is_fitted = hasattr(self.scaler, 'center_') or hasattr(self.scaler, 'mean_')
+                if is_fitted:
+                    flat   = padded.reshape(-1, n_feat)
+                    flat   = self.scaler.transform(flat)
+                    padded = flat.reshape(1, self.max_seq_len, n_feat)
+
+        # Direct call: model.predict() has ~50 ms of per-call overhead
+        prob  = float(self.lstm(padded, training=False).numpy()[0][0])
         label = 1 if prob >= self.optimal_threshold else 0
 
         print(f"  Raw prob   : {prob:.4f}")
@@ -629,6 +685,13 @@ class RealTimeShotPredictor:
         out_folder  = os.path.join(self.output_base, f"{ts}_{name}")
         os.makedirs(out_folder, exist_ok=True)
         return out_folder, ts
+
+    def _det_cache_path(self, video_path: str) -> Path:
+        """Cache key: video name + size, YOLO weights, confidence threshold."""
+        video = Path(video_path)
+        size  = video.stat().st_size if video.exists() else 0
+        name  = f"{video.stem}_{size}_{Path(self.yolo_path).stem}_conf{YOLO_CONF:.2f}.npz"
+        return DETECTIONS_DIR / name
 
     def _save_outputs(self, out_folder: str, video_path: str):
         """Save statistics.json, shots.csv, summary.txt."""
@@ -691,10 +754,17 @@ class RealTimeShotPredictor:
     # ── Video processing ──────────────────────────────────────────────────────
 
     def process_video(self, video_path: str, display: bool = True,
-                      save_video: bool = True, verbose: bool = True):
-        """Main entry point. Processes one video file end-to-end."""
+                      save_video: bool = True, verbose: bool = True,
+                      progress_cb=None):
+        """Main entry point. Processes one video file end-to-end.
+
+        progress_cb(frame_idx, total_frames) is called every 30 frames (used by
+        scripts/app/server.py). Raw frames of each predicted shot are kept in
+        self.shot_frames[shot_number] so a UI can turn corrections into training rows.
+        """
         self._reset_stats()
         self._reset_shot_state()
+        self.shot_frames = {}
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -731,31 +801,55 @@ class RealTimeShotPredictor:
 
         last_pct = -1
 
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
+        # Headless runs (e.g. lstm_eval.py) skip YOLO and video decoding entirely
+        # by replaying cached boxes, so a new LSTM is evaluated in seconds.
+        headless   = not display and not save_video
+        cache_path = self._det_cache_path(video_path)
+        cached     = None
+        if headless and USE_DET_CACHE and cache_path.exists():
+            cached = np.load(cache_path)['boxes']   # rows: frame, cls, x1, y1, x2, y2
+            n_cached = int(cached[:, 0].max()) if len(cached) else total_frames
+            total_frames = max(total_frames, n_cached)
+            # frame_rows[k-1] = boxes of frame k (cache rows are sorted by frame)
+            frame_rows = np.split(cached, np.searchsorted(cached[:, 0], np.arange(1, total_frames + 1)))[1:]
+            print(f"  Using cached detections → {cache_path}")
+        new_cache   = [] if cached is None else None
+        reached_end = False
+
+        while True:
+            if cached is None:
+                ret, frame = cap.read()
+                if not ret:
+                    reached_end = True
+                    break
+            elif self.frame_idx >= total_frames:
                 break
 
             self.frame_idx += 1
 
             # Progress
+            if progress_cb and self.frame_idx % 30 == 0:
+                progress_cb(self.frame_idx, total_frames)
             pct = int(self.frame_idx / total_frames * 100)
             if pct % 10 == 0 and pct != last_pct:
                 print(f"  [{pct}%]")
                 last_pct = pct
 
-            # YOLO detection
-            results     = self.yolo(frame, conf=YOLO_CONF, verbose=False)[0]
-            ball_boxes  = []
-            player_boxes = []
-            basket_boxes = []
+            # YOLO detection (boxes come sorted by confidence)
+            if cached is None:
+                results  = self.yolo(frame, conf=YOLO_CONF, verbose=False,
+                                     device=self.device, half=self.half)[0]
+                cls_arr  = results.boxes.cls.cpu().numpy()
+                xyxy_arr = results.boxes.xyxy.cpu().numpy()
+                new_cache.append(np.column_stack(
+                    [np.full(len(cls_arr), self.frame_idx), cls_arr, xyxy_arr]))
+            else:
+                rows = frame_rows[self.frame_idx - 1]
+                cls_arr, xyxy_arr = rows[:, 1], rows[:, 2:6]
 
-            for box in results.boxes:
-                cls  = int(box.cls[0])
-                xyxy = box.xyxy[0].cpu().numpy()
-                if   cls == self.CLS_BALL:   ball_boxes.append(xyxy)
-                elif cls == self.CLS_BASKET: basket_boxes.append(xyxy)
-                elif cls == self.CLS_PLAYER: player_boxes.append(xyxy)
+            ball_boxes   = list(xyxy_arr[cls_arr == self.CLS_BALL])
+            basket_boxes = list(xyxy_arr[cls_arr == self.CLS_BASKET])
+            player_boxes = list(xyxy_arr[cls_arr == self.CLS_PLAYER])
 
             # Shot detection
             poss_start, conf_start, ended = self._detect_shot(ball_boxes, player_boxes)
@@ -801,6 +895,7 @@ class RealTimeShotPredictor:
                         'end_frame':       self.frame_idx,
                         'n_frames':        len(self.shot_data),
                     })
+                    self.shot_frames[self.stats['total_shots']] = list(self.shot_data)
 
                     # ── Human feedback ────────────────────────────────────────
                     if display and self.feedback_csv:
@@ -818,13 +913,16 @@ class RealTimeShotPredictor:
 
                 self.shot_data = []
 
+            if headless:
+                continue   # nothing to draw or show
+
             # ── Overlay rendering ─────────────────────────────────────────────
             annotated = results.plot()
 
             if self.possible_shot:
                 cv2.rectangle(annotated, (10, 10), (680, 58), (0, 165, 255), -1)
                 cv2.putText(annotated,
-                            f"POSSIBLE SHOT ({self.poss_frame_count}/10)",
+                            f"POSSIBLE SHOT ({self.poss_frame_count}/{sf.CONFIRM_FRAMES})",
                             (18, 44), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,0), 2)
 
             elif self.actual_shot:
@@ -862,7 +960,16 @@ class RealTimeShotPredictor:
                 if key == ord('q'):
                     break
                 elif key == ord('r'):
+                    idx = self.frame_idx          # keep frame numbering intact
                     self._reset_shot_state()
+                    self.frame_idx = idx
+
+        # Cache detections only after a complete pass (not after pressing q)
+        if new_cache is not None and reached_end and USE_DET_CACHE:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            boxes = np.concatenate(new_cache) if new_cache else np.zeros((0, 6))
+            np.savez_compressed(cache_path, boxes=boxes.astype(np.float32))
+            print(f"  Detections cached → {cache_path}")
 
         # Cleanup
         cap.release()
@@ -895,13 +1002,12 @@ if __name__ == "__main__":
 
     print("\nChecking files …")
     ok = True
-    for label, path in [
-        ("YOLO",   YOLO_MODEL),
-        ("LSTM",   LSTM_MODEL),
-        ("Scaler", SCALER_PATH),
-        ("Config", CONFIG_PATH),
-        ("Video",  VIDEO_PATH),
-    ]:
+    needed = [("YOLO", YOLO_MODEL), ("Config", CONFIG_PATH), ("Video", VIDEO_PATH)]
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, 'rb') as f:
+            if pickle.load(f).get('model_type', 'lstm') == 'lstm':
+                needed += [("LSTM", LSTM_MODEL), ("Scaler", SCALER_PATH)]
+    for label, path in needed:
         exists = os.path.exists(path)
         print(f"  {'✅' if exists else '❌'}  {label}: {path}")
         if not exists:

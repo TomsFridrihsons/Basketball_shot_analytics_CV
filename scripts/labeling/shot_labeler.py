@@ -44,6 +44,7 @@ from ultralytics import YOLO
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from paths import YOLO_MODEL, RAW_VIDEO_DIR, ANNOTATIONS_DIR  # noqa: E402
+from shot_features import CONFIRM_FRAMES  # noqa: E402  (shared with lstm_infer.py)
 
 MODEL_PATH = str(YOLO_MODEL)
 VIDEO_PATH = str(RAW_VIDEO_DIR / "20260428_174715.mp4")
@@ -51,7 +52,6 @@ OUTPUT_CSV = str(ANNOTATIONS_DIR / "basketball_shot_data_labeled_04_05_04.csv")
 
 YOLO_CONF       = 0.75   # detection confidence threshold
 MIN_SHOT_FRAMES = 22      # discard shots shorter than this (too few timesteps for LSTM)
-CONFIRM_FRAMES  = 10     # frames ball must stay elevated to confirm a real shot
 DISPLAY_WIDTH   = 480
 # ─────────────────────────────────────────────────────────────────────────────
 

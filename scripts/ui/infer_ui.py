@@ -29,15 +29,15 @@ from datetime import datetime
 INFER_SCRIPT = Path(__file__).resolve().parents[1] / "lstm" / "lstm_infer.py"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from paths import YOLO_MODEL, RAW_VIDEO_DIR, PREDICTIONS_DIR, lstm_artifacts  # noqa: E402
-_LSTM = lstm_artifacts("basketball_shot_lstm_v5")
+from paths import YOLO_MODEL, RAW_VIDEO_DIR, PREDICTIONS_DIR, RIM_RULE_CONFIG, lstm_artifacts  # noqa: E402
+_LSTM = lstm_artifacts("basketball_shot_lstm_v6")
 
 # ── default paths (pre-fill from the script's own defaults) ──────────────────
 DEFAULTS = {
     "yolo":   str(YOLO_MODEL),
     "lstm":   str(_LSTM["model"]),
     "scaler": str(_LSTM["scaler"]),
-    "config": str(_LSTM["config"]),
+    "config": str(RIM_RULE_CONFIG),   # rim-pass rule; pick an *_config.pkl for an LSTM
     "video":  str(RAW_VIDEO_DIR / "20260406_155804.mp4"),
     "output": str(PREDICTIONS_DIR),
 }
