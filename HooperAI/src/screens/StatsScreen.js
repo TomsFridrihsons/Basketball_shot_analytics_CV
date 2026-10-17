@@ -124,19 +124,15 @@ export default function StatsScreen() {
           </View>
         </Card>
 
-        {/* Zone breakdown */}
-        <View>
-          <SectionLabel>Shot zones</SectionLabel>
-          {zones.length === 0 ? (
-            <Card>
-              <Text style={styles.emptyText}>No zone data yet — record some shots first.</Text>
-            </Card>
-          ) : (
+        {/* Zone breakdown – shown once the pipeline reports shot zones */}
+        {zones.length > 0 && (
+          <View>
+            <SectionLabel>Shot zones</SectionLabel>
             <View style={styles.zoneGrid}>
               {zones.map(z => <ZoneCell key={z.name} zone={z} />)}
             </View>
-          )}
-        </View>
+          </View>
+        )}
 
         {/* Model info */}
         <View>
@@ -212,5 +208,4 @@ const styles = StyleSheet.create({
   modelKey: { fontSize: font.base, color: colors.textDim },
   modelVal: { fontSize: font.base, color: colors.text, fontFamily: 'monospace' },
 
-  emptyText: { fontSize: font.base, color: colors.textDim, textAlign: 'center', padding: spacing.lg },
 });

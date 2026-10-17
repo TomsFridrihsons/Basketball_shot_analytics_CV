@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, Animated, Alert, FlatList, ActivityIndicator,
+  View, Text, TouchableOpacity, StyleSheet, Animated, Alert, ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
@@ -9,7 +9,8 @@ import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, radius, spacing, font } from '../utils/theme';
 import { Card } from '../components';
-import { saveSession, labelShot } from '../utils/storage';
+import SessionReview from '../components/SessionReview';
+import { saveSession } from '../utils/storage';
 import * as api from '../services/api';
 
 // Flow: idle → recording → ready (have a clip) → uploading → analyzing → results
@@ -62,46 +63,6 @@ function Progress({ label, value }) {
   );
 }
 
-// ── Shot row with Made / Missed labeling ─────────────────────────────────────
-function ShotRow({ shot, fps, onLabel }) {
-  const made = shot.prediction === 1;
-  const certainty = Math.max(shot.probability, 1 - shot.probability);
-  const verdict = shot.label == null ? null : shot.label === shot.prediction;
-  return (
-    <View style={styles.shotRow}>
-      <View style={styles.shotTop}>
-        <Text style={styles.shotNum}>#{shot.shot_number}</Text>
-        <Text style={styles.shotTime}>{fmtTime((shot.start_frame - 1) / fps)}</Text>
-        <View style={[styles.chip, made ? styles.chipMade : styles.chipMissed]}>
-          <Text style={[styles.chipText, { color: made ? colors.green : colors.orange }]}>
-            {made ? 'MADE' : 'MISSED'}
-          </Text>
-        </View>
-        <Text style={styles.shotConf}>{pct(certainty)}</Text>
-      </View>
-      <View style={styles.fbRow}>
-        <TouchableOpacity
-          style={[styles.fbBtn, shot.label === 1 && styles.fbMadeOn]}
-          onPress={() => onLabel(shot, 1)} activeOpacity={0.8}
-        >
-          <Ionicons name="checkmark" size={15} color={shot.label === 1 ? colors.green : colors.textMuted} />
-          <Text style={[styles.fbLabel, shot.label === 1 && { color: colors.green }]}>Made</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.fbBtn, shot.label === 0 && styles.fbMissOn]}
-          onPress={() => onLabel(shot, 0)} activeOpacity={0.8}
-        >
-          <Ionicons name="close" size={15} color={shot.label === 0 ? colors.orange : colors.textMuted} />
-          <Text style={[styles.fbLabel, shot.label === 0 && { color: colors.orange }]}>Missed</Text>
-        </TouchableOpacity>
-        <Text style={[styles.verdict, { color: verdict ? colors.green : colors.yellow }]}>
-          {verdict == null ? '' : verdict ? '✓ model right' : '✗ model wrong'}
-        </Text>
-      </View>
-    </View>
-  );
-}
-
 // ── Main screen ──────────────────────────────────────────────────────────────
 export default function RecordScreen() {
   const insets = useSafeAreaInsets();
@@ -114,8 +75,7 @@ export default function RecordScreen() {
   const [clip, setClip]         = useState(null);     // { uri, durationS, source }
   const [progress, setProgress] = useState(0);
   const [progressText, setProgressText] = useState('');
-  const [result, setResult]     = useState(null);
-  const [jobId, setJobId]       = useState(null);
+  const [session, setSession]   = useState(null);   // { id, result, video, localUri }
   const [server, setServer]     = useState(null);     // null = checking, true/false
   const [elapsed, setElapsed]   = useState(0);
   const stageRef = useRef(stage);
@@ -146,8 +106,7 @@ export default function RecordScreen() {
   const reset = () => {
     setStage('idle');
     setClip(null);
-    setResult(null);
-    setJobId(null);
+    setSession(null);
     setProgress(0);
   };
 
@@ -201,15 +160,14 @@ export default function RecordScreen() {
       setProgress(0);
       setProgressText('Waiting for the laptop…');
       const { job_id } = await api.analyze(name);
-      setJobId(job_id);
       const res = await api.waitForJob(job_id, (p, st) => {
         setProgress(p);
         setProgressText(st === 'analyzing' ? 'Detecting shots…' : `${st[0].toUpperCase()}${st.slice(1)}…`);
       }, () => cancelled.current);
 
-      setResult(res);
+      await saveSession(job_id, res, { localUri: clip.uri });
+      setSession({ id: job_id, result: res, video: name, localUri: clip.uri });
       setStage('results');
-      await saveSession(job_id, res);
     } catch (e) {
       if (e.message === 'cancelled') return;
       setStage('ready');
@@ -217,23 +175,8 @@ export default function RecordScreen() {
     }
   };
 
-  const onLabel = async (shot, label) => {
-    const before = shot.label;
-    // optimistic update
-    setResult(r => ({ ...r, shots: r.shots.map(s => s.shot_number === shot.shot_number ? { ...s, label } : s) }));
-    try {
-      await api.feedback(jobId, shot.shot_number, label);
-      await labelShot(jobId, shot.shot_number, label);
-    } catch (e) {
-      setResult(r => ({ ...r, shots: r.shots.map(s => s.shot_number === shot.shot_number ? { ...s, label: before } : s) }));
-      Alert.alert('Label not saved', e.message);
-    }
-  };
-
   if (!permission) return <View style={styles.container} />;
 
-  const shots = result?.shots || [];
-  const made = shots.filter(s => (s.label ?? s.prediction) === 1).length;
   const busy = stage === 'uploading' || stage === 'analyzing';
 
   return (
@@ -255,40 +198,16 @@ export default function RecordScreen() {
         </TouchableOpacity>
       </View>
 
-      {stage === 'results' ? (
-        <View style={{ flex: 1 }}>
-          <View style={styles.summaryRow}>
-            <Card style={styles.liveCard}>
-              <Text style={styles.liveVal}>{shots.length}</Text>
-              <Text style={styles.liveLbl}>shots</Text>
-            </Card>
-            <Card style={styles.liveCard}>
-              <Text style={[styles.liveVal, { color: colors.green }]}>{made}</Text>
-              <Text style={styles.liveLbl}>made</Text>
-            </Card>
-            <Card style={styles.liveCard}>
-              <Text style={[styles.liveVal, shots.length > 0 && { color: made / shots.length >= 0.5 ? colors.green : colors.orange }]}>
-                {shots.length ? pct(made / shots.length) : '—'}
-              </Text>
-              <Text style={styles.liveLbl}>FG%</Text>
-            </Card>
-          </View>
-          <Text style={styles.hint}>Check each shot – your labels train the next model.</Text>
-          <FlatList
-            data={shots}
-            keyExtractor={s => String(s.shot_number)}
-            renderItem={({ item }) => <ShotRow shot={item} fps={result.fps} onLabel={onLabel} />}
-            contentContainerStyle={{ padding: spacing.lg, paddingTop: 0, gap: spacing.sm }}
-            ListEmptyComponent={
-              <Card><Text style={styles.emptyText}>No shots were detected in this clip.</Text></Card>
-            }
-          />
-          <View style={styles.bottomBar}>
-            <TouchableOpacity style={styles.primaryBtn} onPress={reset} activeOpacity={0.85}>
+      {stage === 'results' && session ? (
+        <SessionReview
+          session={session}
+          footer={
+            <TouchableOpacity style={[styles.primaryBtn, { marginTop: spacing.md }]} onPress={reset} activeOpacity={0.85}>
+              <Ionicons name="add" size={18} color={colors.white} />
               <Text style={styles.primaryText}>New session</Text>
             </TouchableOpacity>
-          </View>
-        </View>
+          }
+        />
       ) : (
         <>
           {/* Viewfinder */}
@@ -477,43 +396,7 @@ const styles = StyleSheet.create({
   recInner: { width: 48, height: 48, borderRadius: 24, backgroundColor: colors.orange },
   recInnerStop: { width: 22, height: 22, borderRadius: 4 },
 
-  summaryRow: { flexDirection: 'row', gap: spacing.sm, padding: spacing.lg },
-  liveCard: { flex: 1, padding: spacing.md, alignItems: 'center' },
-  liveVal: { fontSize: 20, fontWeight: '500', color: colors.white },
-  liveLbl: { fontSize: font.xs, color: colors.textDim, marginTop: 2 },
-  hint: { fontSize: font.sm, color: colors.textDim, paddingHorizontal: spacing.lg, marginBottom: spacing.sm },
-  emptyText: { fontSize: font.base, color: colors.textMuted, textAlign: 'center' },
 
-  shotRow: {
-    backgroundColor: colors.bgCard, borderRadius: radius.lg, padding: spacing.md,
-    borderWidth: 0.5, borderColor: colors.border, gap: spacing.sm,
-  },
-  shotTop: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  shotNum: { fontSize: font.base, color: colors.textMuted, minWidth: 30 },
-  shotTime: { fontSize: font.sm, color: colors.textDim, flex: 1 },
-  shotConf: { fontSize: font.sm, color: colors.textMuted, minWidth: 36, textAlign: 'right' },
-  chip: { borderRadius: radius.full, paddingHorizontal: spacing.sm, paddingVertical: 2, borderWidth: 0.5 },
-  chipMade: { backgroundColor: colors.greenFade, borderColor: colors.greenBorder },
-  chipMissed: { backgroundColor: colors.orangeFade, borderColor: colors.orangeBorder },
-  chipText: { fontSize: font.xs, fontWeight: '700', letterSpacing: 0.5 },
 
-  fbRow: { flexDirection: 'row', gap: spacing.sm, alignItems: 'center' },
-  fbBtn: {
-    flex: 1,
-    backgroundColor: colors.bgCardDeep,
-    borderWidth: 0.5,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingVertical: spacing.sm,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
-  },
-  fbMadeOn: { borderColor: colors.greenBorder, backgroundColor: colors.greenFade },
-  fbMissOn: { borderColor: colors.orangeBorder, backgroundColor: colors.orangeFade },
-  fbLabel: { fontSize: font.sm, color: colors.textMuted },
-  verdict: { fontSize: font.xs, minWidth: 84, textAlign: 'right' },
 
-  bottomBar: { padding: spacing.lg, paddingTop: spacing.sm, borderTopWidth: 0.5, borderTopColor: '#1e1e1e' },
 });

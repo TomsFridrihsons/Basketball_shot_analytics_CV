@@ -3,6 +3,7 @@ import { View, ActivityIndicator } from 'react-native';
 import { createStackNavigator } from '@react-navigation/stack';
 import TabNavigator from './TabNavigator';
 import SettingsScreen from '../screens/SettingsScreen';
+import SessionScreen from '../screens/SessionScreen';
 import LoginScreen from '../screens/LoginScreen';
 import { isFirebaseConfigured } from '../config';
 import { onUserChanged } from '../services/auth';
@@ -31,6 +32,7 @@ export default function RootNavigator() {
         <>
           <Stack.Screen name="Tabs" component={TabNavigator} />
           <Stack.Screen name="Settings" component={SettingsScreen} />
+          <Stack.Screen name="Session" component={SessionScreen} />
         </>
       )}
     </Stack.Navigator>

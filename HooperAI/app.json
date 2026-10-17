@@ -48,7 +48,8 @@
           "image": "./assets/adaptive-icon.png",
           "imageWidth": 160
         }
-      ]
+      ],
+      "expo-video"
     ]
   }
 }

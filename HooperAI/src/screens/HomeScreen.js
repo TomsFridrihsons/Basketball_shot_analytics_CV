@@ -7,13 +7,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, radius, spacing, font } from '../utils/theme';
-import { Card, SectionLabel, OutcomeChip, ConfBadge, PrimaryButton, Divider } from '../components';
-import { getShots, formatTimeAgo, calcStats } from '../utils/storage';
+import { Card, SectionLabel, PrimaryButton, Divider } from '../components';
+import { getShots, getSessions, sessionSummary, formatTimeAgo, calcStats } from '../utils/storage';
+import * as api from '../services/api';
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const [shots, setShots] = useState([]);
+  const [sessions, setSessions] = useState([]);
   const [stats, setStats] = useState({ total: 0, made: 0, missed: 0, pct: 0 });
   const [refreshing, setRefreshing] = useState(false);
 
@@ -21,6 +23,22 @@ export default function HomeScreen() {
     const data = await getShots();
     setShots(data);
     setStats(calcStats(data));
+    // sessions saved before review support have no result to open
+    const local = (await getSessions()).filter(s => s.result);
+    setSessions(local);
+    // Add sessions the laptop knows but this phone doesn't (older app version, other device)
+    try {
+      const known = new Set(local.map(s => s.id));
+      const remote = (await api.sessions())
+        .filter(s => !known.has(s.id))
+        .map(s => ({ id: s.id, timestamp: s.created, summary: {
+          total: s.total, made: s.made, labeled: s.labeled,
+          pct: s.total ? Math.round((s.made / s.total) * 100) : null,
+        } }));
+      if (remote.length) {
+        setSessions([...local, ...remote].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)));
+      }
+    } catch (_) { /* laptop offline: local sessions only */ }
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -83,38 +101,57 @@ export default function HomeScreen() {
           />
         </Card>
 
-        {/* Shot log */}
+        {/* Sessions */}
         <View style={styles.logHeader}>
-          <SectionLabel style={{ marginBottom: 0 }}>Shot log</SectionLabel>
-          <Text style={styles.logSub}>{shots.length} total</Text>
+          <SectionLabel style={{ marginBottom: 0 }}>Sessions</SectionLabel>
+          <Text style={styles.logSub}>{sessions.length} analyzed</Text>
         </View>
 
         <Card style={{ padding: 0, overflow: 'hidden' }}>
-          {shots.length === 0 ? (
+          {sessions.length === 0 ? (
             <View style={styles.emptyState}>
               <Ionicons name="basketball-outline" size={36} color={colors.textGhost} />
-              <Text style={styles.emptyText}>No shots recorded yet</Text>
-              <Text style={styles.emptyHint}>Start a session to begin tracking</Text>
+              <Text style={styles.emptyText}>No sessions yet</Text>
+              <Text style={styles.emptyHint}>Record or pick a video to analyze your shots</Text>
             </View>
           ) : (
-            shots.slice(0, 30).map((shot, i) => (
-              <View key={shot.id}>
-                <View style={styles.shotRow}>
-                  <Text style={styles.shotNum}>{i + 1}</Text>
-                  <OutcomeChip outcome={shot.outcome} />
-                  <View style={styles.shotInfo}>
-                    <Text style={styles.shotZone}>
-                      {shot.zone || (shot.videoTime != null
-                        ? `Shot ${shot.shotNumber} · ${Math.floor(shot.videoTime / 60)}:${String(Math.floor(shot.videoTime % 60)).padStart(2, '0')}${shot.labeled ? '' : ' · unlabeled'}`
-                        : 'Unknown zone')}
-                    </Text>
-                    <Text style={styles.shotTime}>{formatTimeAgo(shot.timestamp)}</Text>
-                  </View>
-                  <ConfBadge conf={shot.confidence || 0} />
+            sessions.slice(0, 30).map((s, i, list) => {
+              const sum = s.result ? sessionSummary(s) : s.summary;
+              const toReview = sum.total - sum.labeled;
+              return (
+                <View key={s.id}>
+                  <TouchableOpacity style={styles.sessionRow} activeOpacity={0.7}
+                    onPress={() => navigation.navigate('Session', { sessionId: s.id })}>
+                    <View style={styles.sessionIcon}>
+                      <Ionicons name="film-outline" size={18} color={colors.textMuted} />
+                    </View>
+                    <View style={{ flex: 1, gap: 3 }}>
+                      <Text style={styles.sessionTitle}>
+                        {new Date(s.timestamp).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                      </Text>
+                      <Text style={styles.sessionMeta}>
+                        {sum.total} {sum.total === 1 ? 'shot' : 'shots'} · {sum.made} made
+                        {sum.pct != null ? ` · ${sum.pct}%` : ''} · {formatTimeAgo(s.timestamp)}
+                      </Text>
+                      {sum.total > 0 && (
+                        <View style={styles.progressTrack}>
+                          <View style={[styles.progressFill, { width: `${(sum.labeled / sum.total) * 100}%` }]} />
+                        </View>
+                      )}
+                    </View>
+                    {toReview > 0 ? (
+                      <View style={styles.reviewBadge}>
+                        <Text style={styles.reviewText}>{toReview} to review</Text>
+                      </View>
+                    ) : sum.total > 0 ? (
+                      <Ionicons name="checkmark-circle" size={18} color={colors.green} />
+                    ) : null}
+                    <Ionicons name="chevron-forward" size={16} color={colors.textGhost} />
+                  </TouchableOpacity>
+                  {i < list.length - 1 && <Divider />}
                 </View>
-                {i < shots.length - 1 && <Divider />}
-              </View>
-            ))
+              );
+            })
           )}
         </Card>
       </ScrollView>
@@ -124,6 +161,21 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bgScreen },
+
+  sessionRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md },
+  sessionIcon: {
+    width: 36, height: 36, borderRadius: 18, backgroundColor: colors.bgCardDeep,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  sessionTitle: { fontSize: font.base, color: colors.white },
+  sessionMeta: { fontSize: font.xs, color: colors.textDim },
+  progressTrack: { height: 3, backgroundColor: colors.bgCardDeep, borderRadius: radius.full, overflow: 'hidden', marginTop: 2 },
+  progressFill: { height: '100%', backgroundColor: colors.green },
+  reviewBadge: {
+    backgroundColor: colors.yellowFade, borderRadius: radius.full,
+    paddingHorizontal: spacing.sm, paddingVertical: 2,
+  },
+  reviewText: { fontSize: font.xs, color: colors.yellow, fontWeight: '600' },
 
   header: {
     backgroundColor: colors.bgScreen,
@@ -162,18 +214,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
   },
   logSub: { fontSize: font.sm, color: colors.textGhost },
-
-  shotRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-  },
-  shotNum: { fontSize: font.sm, color: colors.textGhost, width: 18, textAlign: 'right' },
-  shotInfo: { flex: 1 },
-  shotZone: { fontSize: font.base, color: colors.text },
-  shotTime: { fontSize: font.xs, color: colors.textGhost, marginTop: 1 },
 
   emptyState: {
     alignItems: 'center',

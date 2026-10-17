@@ -44,7 +44,7 @@ function toShot(sessionId, s, fps) {
     predicted,
     labeled,
     correct: labeled ? outcome === predicted : null,
-    // certainty of the predicted outcome, in % (ConfBadge)
+    // certainty of the predicted outcome, in %
     confidence: Math.round(Math.max(s.probability, 1 - s.probability) * 100),
     videoTime: fps ? (s.start_frame - 1) / fps : null,
     zone: null,
@@ -52,21 +52,25 @@ function toShot(sessionId, s, fps) {
   };
 }
 
-/** Store all shots of an analyzed session (replaces earlier copies of it). */
-export async function saveSession(sessionId, result) {
+/** Store an analyzed session and its shots (replaces earlier copies of it).
+ *  extra.localUri: the original clip on this phone, for review playback. */
+export async function saveSession(sessionId, result, extra = {}) {
   try {
     const shots = (await getShots()).filter(s => s.sessionId !== sessionId);
     const fresh = result.shots.map(s => toShot(sessionId, s, result.fps)).reverse();
     const next = [...fresh, ...shots];
     await AsyncStorage.setItem(SHOTS_KEY, JSON.stringify(next));
 
-    const raw = await AsyncStorage.getItem(SESSION_KEY);
-    const sessions = (raw ? JSON.parse(raw) : []).filter(s => s.id !== sessionId);
+    const sessions = (await getSessions()).filter(s => s.id !== sessionId);
+    const previous = (await getSessions()).find(s => s.id === sessionId);
     sessions.unshift({
-      id: sessionId, video: result.video, total: result.shots.length,
-      timestamp: new Date().toISOString(),
+      id: sessionId,
+      video: result.video,               // name on the laptop (for streaming it back)
+      localUri: extra.localUri ?? previous?.localUri ?? null,   // original clip on this phone
+      result,                            // full server result: shots, fps, labels
+      timestamp: previous?.timestamp ?? new Date().toISOString(),
     });
-    await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(sessions.slice(0, 200)));
+    await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(sessions.slice(0, 100)));
     return next;
   } catch (e) {
     console.error('saveSession error', e);
@@ -74,7 +78,28 @@ export async function saveSession(sessionId, result) {
   }
 }
 
-/** Apply your made/missed label to a stored shot. */
+export async function getSessions() {
+  try {
+    const raw = await AsyncStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+export async function getSession(sessionId) {
+  return (await getSessions()).find(s => s.id === sessionId) || null;
+}
+
+/** Summary numbers for a stored session (labels win over predictions). */
+export function sessionSummary(session) {
+  const shots = session?.result?.shots || [];
+  const made = shots.filter(s => (s.label ?? s.prediction) === 1).length;
+  const labeled = shots.filter(s => s.label != null).length;
+  return { total: shots.length, made, labeled, pct: shots.length ? Math.round((made / shots.length) * 100) : null };
+}
+
+/** Apply your made/missed label to a stored shot and its session. */
 export async function labelShot(sessionId, shotNumber, label) {
   const shots = await getShots();
   const next = shots.map(s => {
@@ -83,6 +108,13 @@ export async function labelShot(sessionId, shotNumber, label) {
     return { ...s, outcome, labeled: true, correct: outcome === s.predicted };
   });
   await AsyncStorage.setItem(SHOTS_KEY, JSON.stringify(next));
+
+  const sessions = await getSessions();
+  const updated = sessions.map(s => (s.id !== sessionId ? s : {
+    ...s,
+    result: { ...s.result, shots: s.result.shots.map(x => (x.shot_number === shotNumber ? { ...x, label } : x)) },
+  }));
+  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(updated));
   return next;
 }
 

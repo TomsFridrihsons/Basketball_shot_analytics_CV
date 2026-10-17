@@ -67,6 +67,12 @@ export async function analyze(video) {
   return request('/api/analyze', { method: 'POST', body: predictor ? { video, config: predictor } : { video } });
 }
 
+/** expo-video source that streams an uploaded video back from the laptop. */
+export async function videoSource(videoName) {
+  const { serverUrl } = await getSettings();
+  return { uri: `${serverUrl}/api/videos/${encodeURIComponent(videoName)}/stream`, headers: await authHeaders() };
+}
+
 /** Upload a local video file (original quality). onProgress(0..1). → {name, size_mb} */
 export async function uploadVideo(uri, onProgress) {
   const { serverUrl } = await getSettings();
