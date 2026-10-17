@@ -2,7 +2,7 @@
 
 Living record of what the project is, what was decided and why, what is done, and
 what is next. Update it in the same commit as any change that alters a decision,
-a result or the status below. Last updated: **2026-10-17** (HPAI-15).
+a result or the status below. Last updated: **2026-10-17** (HPAI-16).
 
 ---
 
@@ -39,6 +39,9 @@ phone ◄──────── shots, review, labels ────────
 - **Videos keep original quality** end to end (no downscaled uploads).
 - Data files (videos, images, CSVs, models) are never deleted during clean-ups.
 - Work is tracked as **HPAI-XX tickets** (section 8).
+- **Planned:** paid tiers, automatic video deletion after 14 / 30 days, and collecting
+  data for further training (section 9). The free-only rule applies until then.
+- Keep the old `testing` and `colab-training` branches for now (owner, 2026-10-17).
 
 ---
 
@@ -134,7 +137,7 @@ cd HooperAI && npx expo start                      # app; Expo Go → exp://<lap
 
 ## 8. Ticket log (HPAI-XX)
 
-Next free ticket: **HPAI-16**. Workflow: `docs/WORKFLOW.md`.
+Next free ticket: **HPAI-17**. Workflow: `docs/WORKFLOW.md`.
 
 | Ticket | Type | Title | Status |
 |---|---|---|---|
@@ -153,3 +156,120 @@ Next free ticket: **HPAI-16**. Workflow: `docs/WORKFLOW.md`.
 | HPAI-13 | bug | Shots dropped when the ball is lost after the rim (portrait clip) | Done |
 | HPAI-14 | feature | "Not a shot" label and manually added shots | Done |
 | HPAI-15 | chore | `progress_context.md`, HPAI ticket workflow, release to `main` | Done |
+| HPAI-16 | chore | Plan: paid tiers, video retention, training-data collection (section 9) | Done |
+
+---
+
+## 9. Future plan: paid tiers, video retention, training data
+
+Status: **planning only, nothing implemented.** Owner requirements are marked (owner);
+everything else is a suggestion to decide on. Open decisions are in 9.6.
+
+### 9.1 Paid tiers (suggested)
+
+| | **Free** | **Pro** (~€4.99/mo or ~€39/yr) | **Coach / Team** (~€14.99/mo) |
+|---|---|---|---|
+| Analysis | 3–5 sessions or ~60 min video / month | ~10 h video / month (fair use) | per player, shared quota |
+| Video kept (owner) | **14 days** | **30 days** (option: 90) | 30–90 days |
+| Predictor | rim-pass rule | rule + LSTM v7, faster queue | as Pro |
+| Review & labels | yes | yes | coach can review and label players' shots |
+| Stats | session FG% | trends over time, shot zones / heat map, weekly report | team dashboard, player comparison |
+| Extras | – | CSV/PDF export, made-shot highlight reel | roster, shared sessions, web dashboard |
+| Ads | none | none | none |
+
+Other options: **session packs** (one-off, e.g. €2.99 for 5 sessions) for occasional
+users; a **free Pro trial** (7–14 days); **labeling credits** (label N shots, get extra
+free minutes – also feeds 9.3).
+
+Feature ideas for paid tiers, roughly by value / effort:
+1. Shot zones + heat map (needs court / player-position mapping) – Pro.
+2. Progress over time: FG% by week, by zone, streaks – Pro.
+3. Made-shot highlight clip export – Pro (cheap: cut from the original video).
+4. Live on-device predictions during practice (on-device roadmap, section 7) – Pro.
+5. Coach accounts: assign players, review their sessions, comments – Team.
+6. Shooting-form feedback (pose estimation: release point, arc) – later, premium.
+7. Challenges / leaderboards between friends – engagement, any tier.
+
+### 9.2 Video retention and deletion (owner: after 14 or 30 days)
+
+- **Deleted after the retention period:** the uploaded video (`data/raw/videos/app_*`)
+  and its per-frame detection cache. **Kept:** the session result (shots, labels,
+  stats), the per-shot feature rows used for training (if the user consented, 9.3) and
+  the Firestore summary.
+- Retention by tier, counted from upload: Free 14 days, Pro 30 (or 90) days. Store
+  `uploaded_at` and the user's tier on each session (server `app_sessions/*.json` and
+  Firestore) so the rule can be applied per user.
+- **Implementation on the laptop server:** a daily sweep (at start-up and every 24 h in
+  a background thread, or via Windows Task Scheduler) deletes expired files, marks the
+  session `video_expired: true` and logs what it removed. The app then shows "video
+  deleted – results kept" instead of the player, and "video expires in N days" on the
+  review screen.
+- **Once in the cloud:** object-storage lifecycle rules (Cloudflare R2 / S3) delete
+  objects after N days at no extra cost – one prefix per tier.
+- **User controls:** "delete this video now" and "delete my account" (videos, sessions,
+  labels linked to the user, Firestore docs, Firebase Auth user). Required under GDPR
+  (right to erasure); the owner is in the EU (Latvia).
+- Videos stored on the phone are the user's own files; the app never deletes them.
+
+### 9.3 Collecting data for further training (owner)
+
+What is worth keeping, most useful first:
+1. **Labeled shot feature rows** – already collected: `app_labeled.csv` (made / missed),
+   `app_not_shots.csv` (false detections), manually added shots. Small, no images.
+2. **Short frame crops around each labeled shot** (the 2–3 s window, downscaled) – what
+   YOLO needs to detect the ball better (the weak link, section 6). Keep them beyond the
+   video retention only with consent.
+3. **Low-confidence shots and model mistakes** – the most valuable labels (active
+   learning: ask users to label those first).
+
+Rules:
+- **Opt-in consent** in the app ("Help improve HooperAI: keep anonymous shot data and
+  short clips for training"), off by default for frames; asked at sign-up and in
+  Settings; can be withdrawn (data then deleted).
+- Privacy policy and terms before any public release. Frames show people, so treat them
+  as personal data (GDPR: consent as the lawful basis, data minimisation, retention
+  limits, list processors such as Firebase and hosting).
+- **Pseudonymise** training exports: replace the uid with a random id, drop file names;
+  keep the source video only as an opaque id so leave-one-video-out evaluation still
+  works.
+- Version datasets as dated snapshots, and always evaluate per video / user (D3).
+
+### 9.4 Payments and accounts
+
+- Digital subscriptions in mobile apps must use **Google Play Billing / Apple In-App
+  Purchase** (store fee 15% for small developers on subscriptions). **RevenueCat**
+  wraps both and is free up to a revenue threshold; Stripe only for a web dashboard.
+- Entitlements: store the tier on the user (Firebase custom claims or a Firestore
+  `users/{uid}` document written by the server / payment webhook). Enforce quotas
+  (minutes per month, retention) **on the server**; the app only mirrors them in the UI.
+- Paid tiers at scale may need Firebase **Blaze** (pay-as-you-go; free quotas still
+  apply), e.g. for payment webhooks in Cloud Functions.
+
+### 9.5 Cost reality (why tiers and on-device matter)
+
+- Paying users can't depend on the owner's laptop: processing has to move to a hosted
+  GPU or onto the phone. Estimate: ~€0.003–0.01 per minute of video on a serverless GPU
+  (based on the measured 24 fps on an RTX 3060).
+- A heavy Pro user (10 h / month ≈ 600 min) costs ~€2–6 / month in GPU time at full
+  price – close to the subscription. So: cap minutes per tier, use cheaper settings
+  (yolo26s, cached detections) and prioritise the **on-device** roadmap (section 7,
+  items 3–4), which makes analysis free to run.
+- Storage: 1080p ≈ 100–130 MB per minute; retention (9.2) keeps storage bounded.
+
+### 9.6 Open decisions
+
+- [ ] Retention: Free 14 days / Pro 30 days – confirm, or 30 / 90?
+- [ ] Prices and quotas per tier; trial length.
+- [ ] Training data beyond retention: feature rows only, or also frame crops?
+- [ ] Where paid users' processing runs: hosted GPU or on-device first.
+- [ ] Payments: RevenueCat (+ Play Billing) or direct.
+
+### 9.7 Ticket candidates (not created yet)
+
+| Area | Work |
+|---|---|
+| Retention | `uploaded_at` + tier on sessions; daily deletion sweep; "expires in N days" / "video deleted" UI; delete-now and delete-account |
+| Data | consent flag + Settings toggle; pseudonymised dataset export script; frame-crop extraction around labeled shots |
+| Tiers | entitlement model + server-side quotas; RevenueCat / Play Billing; paywall screen |
+| Pro features | trends screen; highlight clip export; shot zones |
+| Legal | privacy policy, terms, in-app consent texts |
