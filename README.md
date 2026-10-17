@@ -28,6 +28,9 @@ beats it within known videos; with more labeled videos it is the one expected to
 improve. Models v1–v5 reported 97–100% only because augmented copies of test shots
 were in the training set.
 
+**Project status, decisions and the ticket log:** [`progress_context.md`](progress_context.md) –
+the source of truth. Work is tracked as `HPAI-<n>` tickets: [`docs/WORKFLOW.md`](docs/WORKFLOW.md).
+
 ## Project structure
 
 ```
@@ -59,7 +62,9 @@ HooperAI/                  repo root
 ├── secrets/               server.env + Firebase service account (git-ignored; *.example tracked)
 ├── firestore.rules        Firestore security rules (users read only their own sessions)
 ├── notebooks/experiments/ Colab notebook for training the YOLO detector
-├── docs/                  Colab notebook setup guide
+├── docs/                  WORKFLOW.md (tickets, branches, releases), mobile + Colab guides
+├── .github/               PR / issue templates, ticket check workflow
+├── progress_context.md    decisions, results, status, ticket log (source of truth)
 ├── env.example            Roboflow settings for the notebook (copy to .env)
 ├── data/                  local only, except labeled CSVs (see below)
 ├── archives/              older models and zipped datasets/runs (local only)
@@ -184,9 +189,13 @@ python -m pytest tests -q
   (> 5 frames) count as a miss.
 - Models v1–v5 still load in `lstm_infer.py` (legacy feature path).
 
-## Branches
+## Branches and tickets
 
-`main` is stable; do day-to-day work on `development` or feature branches and open a PR into `main`.
+`main` is production, `development` is integration, and each change lives on a
+`<feature|bugfix|hotfix|chore>/HPAI-<n>-<short-name>` branch merged into `development`
+first. Commit messages and PR titles start with `HPAI-<n>`. Details and the release
+steps: [`docs/WORKFLOW.md`](docs/WORKFLOW.md); install the commit hooks once with
+`sh scripts/git-hooks/install.sh`.
 
 ## License
 

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Every commit message starts with a ticket: "HPAI-<n>: summary".
+# Merge commits, reverts and fixup!/squash! commits are exempt.
+FIRST=$(grep -v '^#' "$1" | sed -n '/./{p;q;}')
+
+case "$FIRST" in
+  HPAI-[0-9]*:*|Merge\ *|Revert\ *|fixup!*|squash!*|amend!*) exit 0 ;;
+esac
+
+echo "commit-msg: the message must start with a ticket, e.g. 'HPAI-16: add retraining script'." >&2
+echo "            Branches are <type>/HPAI-<n>-<name>; see docs/WORKFLOW.md." >&2
+exit 1
