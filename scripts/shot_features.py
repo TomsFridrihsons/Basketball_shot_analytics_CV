@@ -62,6 +62,15 @@ CONFIRM_FRAMES = 23
 # A confirmed shot ends when the ball has been missing this long (0.5 s at 30 fps):
 # after the rim it is often lost in the net or blurred and never seen coming down.
 SHOT_LOST_S = 0.5
+
+# New start trigger + aim check (HPAI-20), in basket widths / seconds
+HOOP_ZONE_W = 4.0       # zone above the hoop: |x - hoop x| < this many basket widths
+HOOP_ZONE_H = 8.0       # ...and up to this many basket widths above the rim
+BELOW_RIM_END = 1.5     # shot ends when the ball is this far below the rim
+AIM_TOL = 2.0           # aim ok: parabola reaches rim height within this many widths of the hoop
+AIM_REJECT = 5.0        # aim off: further than this → possible shot dropped
+AIM_MIN_S = 0.25        # aim ok confirms a shot after this long (instead of CONFIRM_S)
+AIM_MIN_POINTS = 5      # ball points needed before the aim check speaks
 SHOT_LOST_FRAMES = 15
 
 

@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from paths import (YOLO_MODEL as _YOLO, RAW_VIDEO_DIR, PREDICTIONS_DIR,  # noqa: E402
                    ANNOTATIONS_DIR, DETECTIONS_DIR, RIM_RULE_CONFIG, lstm_artifacts)
 import shot_features as sf  # noqa: E402
+import ball_track  # noqa: E402
 
 _LSTM = lstm_artifacts("basketball_shot_lstm_v6")
 YOLO_MODEL  = str(_YOLO)
@@ -53,6 +54,7 @@ OUTPUT_DIR  = str(PREDICTIONS_DIR)
 YOLO_CONF        = 0.75   # threshold for basket and player boxes (server: yolo_conf)
 BALL_CONF        = 0.35   # the ball is small and blurred: it scores lower (HPAI-18)
 CACHE_CONF       = 0.25   # YOLO runs at this level; per-class thresholds apply when reading
+NEW_TRIGGER      = True   # hoop-zone trigger + aim check (HPAI-20); False = above-players only
 DISPLAY          = True   # show OpenCV window
 SAVE_VIDEO       = True   # write annotated video to output folder
 FEEDBACK_CSV     = str(ANNOTATIONS_DIR / "feedback_labels.csv")
@@ -394,6 +396,7 @@ class RealTimeShotPredictor:
         self.last_prob         = None
         self.shot_missing      = 0     # frames without ball/player during a confirmed shot
         self.trim_tail         = 0     # trailing empty frames to drop when a shot is closed as lost
+        self.aim_pts           = []    # (frame, x, y) of the ball during a possible shot
 
     def _reset_stats(self):
         self.stats = {
@@ -474,13 +477,41 @@ class RealTimeShotPredictor:
 
     # ── Shot detection state machine ──────────────────────────────────────────
 
+    def _aim(self):
+        """Aim check (HPAI-20): fit a parabola to the ball points of the possible
+        shot and see where its descending branch reaches rim height.
+        Returns 'ok' (towards the rim), 'off' (clearly not) or None (can't tell)."""
+        if not self._last_basket or len(self.aim_pts) < sf.AIM_MIN_POINTS:
+            return None
+        cx, cy, w, _ = self._last_basket
+        t, x, y = (np.array(v, dtype=float) for v in zip(*self.aim_pts))
+        fit = ball_track.fit_parabola(t, x, y)
+        if fit is None:
+            return None
+        px, py = fit
+        if py.order < 2 or py.c[0] <= 0:          # image y grows downwards: must curve down
+            return None
+        vertex = -py.c[1] / (2 * py.c[0])
+        roots = [r.real for r in (py - cy).roots if abs(r.imag) < 1e-9 and r.real > vertex]
+        if not roots:
+            return 'off' if py(vertex) > cy else None   # apex below the rim: can't reach it
+        miss = abs(px(min(roots)) - cx) / w
+        if miss < sf.AIM_TOL:
+            return 'ok'
+        return 'off' if miss > sf.AIM_REJECT else None
+
     def _detect_shot(self, ball_boxes, player_boxes):
         """
         Two-stage detection:
-          Stage 1 (possible): ball rises above all player tops.
-          Stage 2 (confirmed): ball stays elevated for ≥ 10 frames.
+          Stage 1 (possible): ball rises above all player tops, or (NEW_TRIGGER)
+                              enters the zone above the hoop.
+          Stage 2 (confirmed): stays elevated for CONFIRM_S, or (NEW_TRIGGER) the
+                              aim check says it is heading for the rim. A possible
+                              shot whose arc clearly misses the hoop is dropped.
         Returns (possible_started, confirmed_started, shot_ended).
         """
+        if NEW_TRIGGER:
+            return self._detect_shot_v2(ball_boxes, player_boxes)
         poss_started = conf_started = ended = False
 
         if not ball_boxes or not player_boxes:
@@ -540,6 +571,78 @@ class RealTimeShotPredictor:
             ended            = True
 
         return poss_started, conf_started, ended
+
+    def _detect_shot_v2(self, ball_boxes, player_boxes):
+        """Hoop-zone trigger + aim check (HPAI-20). Works without a player box."""
+        poss_started = conf_started = ended = False
+        basket = self._last_basket
+
+        if not ball_boxes or (not player_boxes and not basket):
+            if self.actual_shot:
+                self.shot_missing += 1
+                if self.shot_missing > sf.frames(sf.SHOT_LOST_S, self.video_fps):
+                    self.actual_shot = False
+                    self.trim_tail   = self.shot_missing
+                    ended            = True
+                return poss_started, conf_started, ended
+            if self.possible_shot:
+                self.poss_frame_count += 1
+                if self.poss_frame_count > sf.frames(sf.POSSIBLE_TIMEOUT_S, self.video_fps):
+                    self._cancel_possible()
+            return poss_started, conf_started, ended
+
+        self.shot_missing = 0
+        ball  = ball_boxes[0]
+        bx, by = (ball[0] + ball[2]) / 2, (ball[1] + ball[3]) / 2
+        p_top = min(p[1] for p in player_boxes) if player_boxes else None
+        above_players = p_top is not None and ball[3] < p_top
+        in_zone = below_rim = False
+        if basket:
+            cx, cy, w, h = basket
+            in_zone = (abs(bx - cx) < sf.HOOP_ZONE_W * w
+                       and cy - sf.HOOP_ZONE_H * w < by < cy - 0.5 * h)
+            below_rim = by > cy + sf.BELOW_RIM_END * w
+        elevated = above_players or in_zone
+        # end of the shot: back below the rim when the hoop is known, else below the players
+        back_down = below_rim if basket else (p_top is not None and by > p_top)
+
+        if not self.possible_shot and not self.actual_shot and elevated:
+            self.possible_shot    = True
+            self.poss_frame_count = 0
+            self.pre_data         = []
+            self.aim_pts          = []
+            self.shot_start_frame = self.frame_idx
+            poss_started          = True
+
+        if self.possible_shot and not self.actual_shot:
+            self.poss_frame_count += 1
+            self.aim_pts.append((self.frame_idx, bx, by))
+            if elevated:
+                aim = self._aim()
+                long_enough = self.poss_frame_count >= sf.frames(sf.CONFIRM_S, self.video_fps)
+                quick_aim = aim == 'ok' and self.poss_frame_count >= sf.frames(sf.AIM_MIN_S, self.video_fps)
+                if aim == 'off' and len(self.aim_pts) >= sf.AIM_MIN_POINTS + 3:
+                    self._cancel_possible()          # arc clearly misses the hoop: pass / dribble
+                elif long_enough or quick_aim:
+                    self.actual_shot   = True
+                    self.possible_shot = False
+                    self.shot_data     = self.pre_data[:]
+                    self.pre_data      = []
+                    conf_started       = True
+            else:
+                self._cancel_possible()
+
+        if self.actual_shot and back_down:
+            self.actual_shot = False
+            ended            = True
+
+        return poss_started, conf_started, ended
+
+    def _cancel_possible(self):
+        self.possible_shot    = False
+        self.poss_frame_count = 0
+        self.pre_data         = []
+        self.aim_pts          = []
 
     # ── Human feedback overlay ────────────────────────────────────────────────
 
@@ -939,6 +1042,11 @@ class RealTimeShotPredictor:
             ball_boxes   = list(xyxy_arr[cls_arr == self.CLS_BALL])
             basket_boxes = list(xyxy_arr[cls_arr == self.CLS_BASKET])
             player_boxes = list(xyxy_arr[cls_arr == self.CLS_PLAYER])
+
+            # Hoop position for the trigger (fixed camera: last seen is fine)
+            if basket_boxes:
+                b = basket_boxes[0]
+                self._last_basket = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2, b[2] - b[0], b[3] - b[1])
 
             # Shot detection
             poss_start, conf_start, ended = self._detect_shot(ball_boxes, player_boxes)
