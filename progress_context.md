@@ -153,7 +153,7 @@ cd HooperAI && npx expo start                      # app; Expo Go → exp://<lap
 
 ## 8. Ticket log (HPAI-XX)
 
-Next free ticket: **HPAI-29**. Workflow: `docs/WORKFLOW.md`.
+Next free ticket: **HPAI-30**. Workflow: `docs/WORKFLOW.md`.
 
 | Ticket | Type | Title | Status |
 |---|---|---|---|
@@ -185,6 +185,7 @@ Next free ticket: **HPAI-29**. Workflow: `docs/WORKFLOW.md`.
 | HPAI-26 | feature | Stats screen redesign (Apple HIG charts): 7/30 days/All period, FG% with change vs previous period, FG% per session bar chart with average and VoiceOver summary, volume, average shot metrics (reliable shots only), detection trust card | Done |
 | HPAI-27 | feature | Settings + Login redesign (Apple HIG): grouped settings that save as you type, live laptop status, predictor checkmark list, in-app account deletion; login with labelled fields, show/hide password, disabled-until-valid button | Done |
 | HPAI-28 | bugfix | Accounts saw each other's data: phone cache keyed by the signed-in Firebase uid (old shared cache dropped), sync keeps only the sessions the laptop lists for the account; server records video owners and limits list/stream/analyze to them; /api/stats laptop-only | Done |
+| HPAI-29 | bugfix | Stats chart drawing: tick labels on their grid lines, bars spread across the width, time labels when all sessions are on one day; "You agreed with the model" wording | Done |
 
 ---
 
