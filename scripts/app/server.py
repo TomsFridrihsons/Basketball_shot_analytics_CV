@@ -1,26 +1,25 @@
 """
-server.py  –  HooperAI laptop test app (local web UI + JSON API)
-================================================================
-Test the newest pipeline on the laptop before wiring it into the mobile app.
-The JSON API is the same shape the mobile app can call later.
+server.py  –  HooperAI test bench + mobile backend (local web UI + JSON API)
+===========================================================================
+Runs the newest pipeline on the laptop. The browser UI (static/) and the
+mobile app (HooperAI/) use the same JSON API.
 
-    python scripts/app/server.py            # → http://127.0.0.1:8000
+    python scripts/app/server.py                     # → http://127.0.0.1:8000 (laptop only)
+    HOOPER_HOST=0.0.0.0 HOOPER_API_KEY=... python scripts/app/server.py   # phone on Wi-Fi / Tailscale
 
-Features
-  - pick a video from data/raw/videos (or upload one) and a predictor
-    (rim-pass rule, LSTM v7, …), run YOLO + shot detection + prediction
-  - review: video with live boxes, shot timeline, per-shot prediction
-  - label each shot made/missed → data/processed/annotations/app_labeled.csv
-    (same columns as the labeler CSVs, so lstm_train.py can use it)
-  - stats: predicted FG%, model accuracy on the shots you labeled
+Authentication: see auth.py (none on localhost, API key, or Firebase ID tokens).
+Sessions are saved in data/processed/app_sessions/ so results survive restarts;
+in Firebase mode they are also mirrored to Firestore (firestore_sync.py).
 
-API
+API (all JSON; everything except /api/health needs credentials off-laptop)
+  GET  /api/health                 server up, auth mode (no auth)
   GET  /api/status                 device, predictors, YOLO model
-  GET  /api/videos                 video library
-  POST /api/videos                 upload (multipart field "file")
-  GET  /api/videos/{name}/stream   video file (HTTP range requests)
-  POST /api/analyze                {video, config, yolo_conf} → {job_id}
+  GET  /api/videos                 video library (data/raw/videos)
+  POST /api/videos                 upload (multipart field "file") → {name}
+  GET  /api/videos/{name}/stream   video file with HTTP range support
+  POST /api/analyze                {video, config?, yolo_conf?} → {job_id}
   GET  /api/jobs/{job_id}          progress + result
+  GET  /api/sessions               your analyzed sessions (newest first)
   GET  /api/detections/{job_id}    per-frame boxes for the overlay
   POST /api/feedback               {job_id, shot_number, label}
   GET  /api/stats                  totals over app_labeled.csv
@@ -28,6 +27,8 @@ API
 
 import os
 import sys
+import json
+import time
 import uuid
 import pickle
 import threading
@@ -37,26 +38,46 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+def _load_env_file(path: Path):
+    """KEY=VALUE lines from secrets/server.env (git-ignored); real env vars win."""
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and not line.lstrip().startswith("#") and key.strip() not in os.environ:
+                os.environ[key.strip()] = value.strip().strip('"')
+
+
+_load_env_file(Path(__file__).resolve().parents[2] / "secrets" / "server.env")
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lstm"))
-from paths import (MODEL_DIR, RAW_VIDEO_DIR, ANNOTATIONS_DIR, PREDICTIONS_DIR,  # noqa: E402
-                   YOLO_MODEL, RIM_RULE_CONFIG)
+from paths import (DATA_DIR, MODEL_DIR, RAW_VIDEO_DIR, ANNOTATIONS_DIR,  # noqa: E402
+                   PREDICTIONS_DIR, YOLO_MODEL, RIM_RULE_CONFIG)
 import shot_features as sf  # noqa: E402
 import lstm_infer as infer  # noqa: E402
+from auth import Auth, User  # noqa: E402
+from firestore_sync import FirestoreSync  # noqa: E402
 
 STATIC_DIR   = Path(__file__).resolve().parent / "static"
 FEEDBACK_CSV = ANNOTATIONS_DIR / "app_labeled.csv"
-VIDEO_EXTS   = {".mp4", ".mov", ".avi", ".mkv"}
+SESSIONS_DIR = DATA_DIR / "processed" / "app_sessions"
+VIDEO_EXTS   = {".mp4", ".mov", ".avi", ".mkv", ".3gp", ".m4v"}
+API_VERSION  = 2
 
-app = FastAPI(title="HooperAI test app")
-JOBS: dict = {}
-_PREDICTORS: dict = {}      # (config path, yolo conf) → RealTimeShotPredictor (load once)
+app = FastAPI(title="HooperAI test bench")
+AUTH = Auth()
+FIRESTORE = FirestoreSync(AUTH.firebase_app)
+JOBS: dict = {}             # job_id → in-memory job (also persisted when done)
+_PREDICTORS: dict = {}      # (config, yolo conf) → RealTimeShotPredictor (load once)
 _LOCK = threading.Lock()    # one analysis at a time (GPU memory, shared predictor state)
+
+current_user = AUTH.user    # FastAPI dependency
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -126,6 +147,40 @@ def _shot_labels(video: str) -> dict:
     return {int(r.start): int(r.label) for r in shots.itertuples()}
 
 
+# ── session persistence ──────────────────────────────────────────────────────
+
+def _save_session(job: dict):
+    """Result as JSON (listing) + shot frames as pickle (needed for labels)."""
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    public = {k: job[k] for k in ('id', 'uid', 'video', 'config', 'created', 'status', 'result') if k in job}
+    (SESSIONS_DIR / f"{job['id']}.json").write_text(json.dumps(public), encoding="utf-8")
+    with open(SESSIONS_DIR / f"{job['id']}_frames.pkl", 'wb') as f:
+        pickle.dump({'shot_frames': job.get('shot_frames', {}), 'cache_path': job.get('cache_path')}, f)
+
+
+def _load_session(job_id: str) -> dict | None:
+    path = SESSIONS_DIR / f"{job_id}.json"
+    if not path.exists():
+        return None
+    job = json.loads(path.read_text(encoding="utf-8"))
+    job['progress'] = 1.0
+    frames = SESSIONS_DIR / f"{job_id}_frames.pkl"
+    if frames.exists():
+        with open(frames, 'rb') as f:
+            job.update(pickle.load(f))
+    JOBS[job_id] = job
+    return job
+
+
+def _job(job_id: str, user: User) -> dict:
+    if not job_id.isalnum():
+        raise HTTPException(404, "unknown job")
+    job = JOBS.get(job_id) or _load_session(job_id)
+    if job is None or (user.mode != "local" and job.get('uid') != user.uid):
+        raise HTTPException(404, "unknown job")   # 404, not 403: don't reveal other users' jobs
+    return job
+
+
 # ── analysis job ─────────────────────────────────────────────────────────────
 
 def _run_job(job_id: str, video: Path, config_name: str, yolo_conf: float):
@@ -162,6 +217,11 @@ def _run_job(job_id: str, video: Path, config_name: str, yolo_conf: float):
             'threshold': stats['model_info']['optimal_threshold'],
             'shots': shots,
         })
+        _save_session(job)
+        try:
+            FIRESTORE.save_session(job['uid'], job)
+        except Exception:
+            traceback.print_exc()   # results are safe on disk; sync is best-effort
     except Exception as e:
         traceback.print_exc()
         job.update(status='error', error=f"{type(e).__name__}: {e}")
@@ -169,8 +229,13 @@ def _run_job(job_id: str, video: Path, config_name: str, yolo_conf: float):
 
 # ── API ──────────────────────────────────────────────────────────────────────
 
+@app.get("/api/health")
+def health():
+    return {'ok': True, 'auth_mode': AUTH.mode, 'firestore': FIRESTORE.enabled, 'api_version': API_VERSION}
+
+
 @app.get("/api/status")
-def status():
+def status(user: User = Depends(current_user)):
     import torch
     return {
         'device': torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU',
@@ -179,11 +244,12 @@ def status():
         'yolo_found': YOLO_MODEL.exists(),
         'predictors': _predictor_configs(),
         'default_predictor': RIM_RULE_CONFIG.name,
+        'user': {'uid': user.uid, 'mode': user.mode, 'email': user.email},
     }
 
 
 @app.get("/api/videos")
-def videos():
+def videos(user: User = Depends(current_user)):
     out = []
     for p in sorted(RAW_VIDEO_DIR.iterdir()) if RAW_VIDEO_DIR.exists() else []:
         if p.suffix.lower() in VIDEO_EXTS:
@@ -194,20 +260,25 @@ def videos():
 
 
 @app.post("/api/videos")
-async def upload_video(file: UploadFile = File(...)):
-    name = Path(file.filename or "upload.mp4").name
-    if Path(name).suffix.lower() not in VIDEO_EXTS:
+async def upload_video(file: UploadFile = File(...), user: User = Depends(current_user)):
+    """Store an uploaded clip as data/raw/videos/app_<time>_<name> (original quality)."""
+    original = Path(file.filename or "upload.mp4").name
+    if Path(original).suffix.lower() not in VIDEO_EXTS:
         raise HTTPException(400, "unsupported video type")
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in original)
+    name = f"app_{time.strftime('%Y%m%d_%H%M%S')}_{safe}"
     RAW_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
     dest = RAW_VIDEO_DIR / name
-    with open(dest, 'wb') as f:
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with open(tmp, 'wb') as f:
         while chunk := await file.read(8 << 20):
             f.write(chunk)
-    return {'name': name}
+    tmp.replace(dest)   # never leave a half-written video under its final name
+    return {'name': name, 'size_mb': round(dest.stat().st_size / 1e6, 1)}
 
 
 @app.get("/api/videos/{name}/stream")
-def stream_video(name: str, request: Request):
+def stream_video(name: str, request: Request, user: User = Depends(current_user)):
     """Serve the video with HTTP range support so the browser can seek."""
     path = _video_path(name)
     size = path.stat().st_size
@@ -243,34 +314,52 @@ class AnalyzeRequest(BaseModel):
 
 
 @app.post("/api/analyze")
-def analyze(req: AnalyzeRequest):
+def analyze(req: AnalyzeRequest, user: User = Depends(current_user)):
     video = _video_path(req.video)
-    if not (MODEL_DIR / req.config).exists():
+    if Path(req.config).name != req.config or not (MODEL_DIR / req.config).exists():
         raise HTTPException(404, f"predictor not found: {req.config}")
     job_id = uuid.uuid4().hex[:12]
-    JOBS[job_id] = {'status': 'queued', 'progress': 0.0, 'video': video.name, 'config': req.config}
+    JOBS[job_id] = {'id': job_id, 'uid': user.uid, 'status': 'queued', 'progress': 0.0,
+                    'video': video.name, 'config': req.config,
+                    'created': time.strftime('%Y-%m-%dT%H:%M:%S')}
     threading.Thread(target=_run_job, args=(job_id, video, req.config, req.yolo_conf),
                      daemon=True).start()
     return {'job_id': job_id}
 
 
-def _job(job_id: str) -> dict:
-    if job_id not in JOBS:
-        raise HTTPException(404, "unknown job")
-    return JOBS[job_id]
-
-
 @app.get("/api/jobs/{job_id}")
-def job_status(job_id: str):
-    job = _job(job_id)
-    return {k: v for k, v in job.items() if k in ('status', 'progress', 'video', 'config', 'error', 'result')}
+def job_status(job_id: str, user: User = Depends(current_user)):
+    job = _job(job_id, user)
+    return {k: v for k, v in job.items()
+            if k in ('id', 'status', 'progress', 'video', 'config', 'created', 'error', 'result')}
+
+
+@app.get("/api/sessions")
+def sessions(user: User = Depends(current_user)):
+    out = []
+    for path in SESSIONS_DIR.glob("*.json") if SESSIONS_DIR.exists() else []:
+        try:
+            s = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if user.mode != "local" and s.get('uid') != user.uid:
+            continue
+        shots = s.get('result', {}).get('shots', [])
+        out.append({
+            'id': s['id'], 'video': s['video'], 'config': s['config'], 'created': s['created'],
+            'total': len(shots),
+            'made': sum(1 for x in shots if (x['label'] if x.get('label') is not None else x['prediction']) == 1),
+            'labeled': sum(1 for x in shots if x.get('label') is not None),
+        })
+    out.sort(key=lambda s: s['created'], reverse=True)
+    return out
 
 
 @app.get("/api/detections/{job_id}")
-def detections(job_id: str):
+def detections(job_id: str, user: User = Depends(current_user)):
     """Boxes per frame as [frame, cls, x1, y1, x2, y2] rows (from the detection cache)."""
-    job = _job(job_id)
-    if job.get('status') != 'done' or not Path(job.get('cache_path', '')).exists():
+    job = _job(job_id, user)
+    if job.get('status') != 'done' or not Path(job.get('cache_path') or '').exists():
         raise HTTPException(409, "detections not ready")
     boxes = np.load(job['cache_path'])['boxes']
     return {'boxes': np.round(boxes).astype(int).tolist(),
@@ -286,11 +375,13 @@ class Feedback(BaseModel):
 
 
 @app.post("/api/feedback")
-def feedback(fb: Feedback):
+def feedback(fb: Feedback, user: User = Depends(current_user)):
     """Save the shot's raw frames with the human label, in labeler-CSV format."""
-    job = _job(fb.job_id)
+    if fb.label not in (0, 1):
+        raise HTTPException(400, "label must be 0 (missed) or 1 (made)")
+    job = _job(fb.job_id, user)
     frames = job.get('shot_frames', {}).get(fb.shot_number)
-    shot = next((s for s in job.get('result', {}).get('shots', [])
+    shot = next((s for s in (job.get('result') or {}).get('shots', [])
                  if s['shot_number'] == fb.shot_number), None)
     if frames is None or shot is None:
         raise HTTPException(404, "shot not found in this analysis")
@@ -318,11 +409,16 @@ def feedback(fb: Feedback):
     out.to_csv(FEEDBACK_CSV, index=False)
 
     shot['label'] = int(fb.label)
+    _save_session(job)
+    try:
+        FIRESTORE.update_label(job['uid'], job)
+    except Exception:
+        traceback.print_exc()
     return {'saved': True, 'labeled_shots': int(out['shot_number'].nunique())}
 
 
 @app.get("/api/stats")
-def stats():
+def stats(user: User = Depends(current_user)):
     df = _load_feedback()
     if df.empty:
         return {'labeled_shots': 0, 'videos': 0}
@@ -344,5 +440,7 @@ app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 if __name__ == "__main__":
     host = os.environ.get("HOOPER_HOST", "127.0.0.1")   # 0.0.0.0 to reach it from a phone
     port = int(os.environ.get("HOOPER_PORT", "8000"))
-    print(f"HooperAI test app → http://{host}:{port}")
+    AUTH.check_host(host)
+    print(f"HooperAI server → http://{host}:{port}   (auth: {AUTH.mode}, "
+          f"firestore sync: {'on' if FIRESTORE.enabled else 'off'})")
     uvicorn.run(app, host=host, port=port)

@@ -1,0 +1,16 @@
+rules_version = '2';
+
+// Paste into Firebase console → Firestore Database → Rules (or `firebase deploy --only firestore:rules`).
+// Each signed-in user can read only their own sessions. Only the laptop server
+// writes them (firebase-admin bypasses these rules), so clients get no write access.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid}/sessions/{sessionId} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
