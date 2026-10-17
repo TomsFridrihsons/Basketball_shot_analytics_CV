@@ -7,7 +7,6 @@ import SessionScreen from '../screens/SessionScreen';
 import LoginScreen from '../screens/LoginScreen';
 import { isFirebaseConfigured } from '../config';
 import { onUserChanged } from '../services/auth';
-import { setStorageOwner } from '../utils/storage';
 import { colors } from '../utils/theme';
 
 const Stack = createStackNavigator();
@@ -15,12 +14,7 @@ const Stack = createStackNavigator();
 export default function RootNavigator() {
   // Without Firebase there is no sign-in; the app goes straight to the tabs.
   const [user, setUser] = useState(undefined);   // undefined = still restoring the session
-  // Point the local cache at this account before any screen reads it
-  useEffect(() => onUserChanged(async (u) => {
-    try { await setStorageOwner(u?.uid); }
-    catch (e) { console.warn('setStorageOwner failed', e); }
-    finally { setUser(u); }   // never leave the app stuck on the spinner
-  }), []);
+  useEffect(() => onUserChanged(setUser), []);
 
   if (isFirebaseConfigured && user === undefined) {
     return (
