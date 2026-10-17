@@ -78,6 +78,7 @@ EPOCHS     = 200
 PATIENCE   = 20
 BATCH_SIZE = 32
 VAL_FRAC   = 0.15
+FEAT_VERSION = sf.FEATURE_VERSION   # --features overrides (compare v2 / v3)
 CORR_L2    = 1e-2   # penalty on the LSTM correction's output weights
 
 
@@ -131,7 +132,7 @@ def load_shots(paths):
 
 
 def featurize(shots):
-    return [sf.shot_to_features(s['raw']) for s in shots]
+    return [sf.shot_to_features(s['raw'], FEAT_VERSION) for s in shots]
 
 
 def augment(seqs, labels, rng, mirror: bool = True):
@@ -287,7 +288,7 @@ def _folds(shots, mode):
 
 
 def _rim_offsets(shots):
-    return np.array([sf.rim_pass_offset(sf.shot_to_features(s['raw'])) for s in shots])
+    return np.array([sf.rim_pass_offset(sf.shot_to_features(s['raw'], FEAT_VERSION)) for s in shots])
 
 
 def _best_rim_threshold(offset, labels):
@@ -301,7 +302,7 @@ def save_rim_rule(shots, cv_results: dict):
     t = _best_rim_threshold(offset, labels)
     config = {
         'model_type':        'rim_rule',
-        'feature_version':   sf.FEATURE_VERSION,
+        'feature_version':   FEAT_VERSION,
         'rim_threshold':     t,
         'optimal_threshold': 0.5,     # lstm_infer maps offset → score with 0.5 at rim_threshold
         'max_len':           sf.MAX_LEN,
@@ -396,7 +397,7 @@ def train_final(shots, cv_results: dict, save: bool = True):
     lengths = [len(s) for s in seqs]
     config = {
         'model_type':        'lstm_hybrid',
-        'feature_version':   sf.FEATURE_VERSION,
+        'feature_version':   FEAT_VERSION,
         'max_len':           sf.MAX_LEN,
         'feature_cols':      sf.FEATURE_COLS,
         'raw_cols':          sf.RAW_COLS,
@@ -442,7 +443,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Fit the rim-pass rule and train the shot-outcome LSTM")
     ap.add_argument("--cv", choices=["both", "video", "shot", "none"], default="both")
     ap.add_argument("--no-save", action="store_true", help="skip training the final model")
+    ap.add_argument("--features", type=int, choices=[2, 3], default=sf.FEATURE_VERSION,
+                    help="feature version (2: original, 3: cleaned + parabola-filled ball track)")
+    ap.add_argument("--rule-only", action="store_true", help="evaluate / save only the rim-pass rule")
     args = ap.parse_args()
+    FEAT_VERSION = args.features
 
     keras.utils.set_random_seed(SEED)
     for p in DATA_PATHS:
@@ -450,7 +455,7 @@ if __name__ == "__main__":
             raise SystemExit(f"ERROR: data file not found → {p}")
 
     print("=" * 60)
-    print("BASKETBALL SHOT PREDICTION – TRAINING v7")
+    print(f"BASKETBALL SHOT PREDICTION – TRAINING v7 (features v{FEAT_VERSION})")
     print("=" * 60)
     shots = load_shots(DATA_PATHS)
 
@@ -458,8 +463,10 @@ if __name__ == "__main__":
     cv_results = {}
     for mode in modes:
         cv_results[f"{mode}_rim_rule"] = rim_rule_cv(shots, mode)
-        cv_results[mode] = cross_validate(shots, mode)
+        if not args.rule_only:
+            cv_results[mode] = cross_validate(shots, mode)
 
     if not args.no_save:
         save_rim_rule(shots, cv_results)
-        train_final(shots, cv_results)
+        if not args.rule_only:
+            train_final(shots, cv_results)

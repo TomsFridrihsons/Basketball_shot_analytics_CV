@@ -44,7 +44,7 @@ from ultralytics import YOLO
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from paths import YOLO_MODEL, RAW_VIDEO_DIR, ANNOTATIONS_DIR  # noqa: E402
-from shot_features import CONFIRM_FRAMES  # noqa: E402  (shared with lstm_infer.py)
+from shot_features import CONFIRM_S, POSSIBLE_TIMEOUT_S, frames  # noqa: E402  (shared with lstm_infer.py)
 
 MODEL_PATH = str(YOLO_MODEL)
 VIDEO_PATH = str(RAW_VIDEO_DIR / "20260428_174715.mp4")
@@ -109,7 +109,8 @@ class InteractiveShotDetector:
             raise ValueError(f"Cannot open video: {self.video_path}")
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps          = cap.get(cv2.CAP_PROP_FPS)
+        fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        self.fps     = fps
 
         print(f"Video  : {self.video_path}")
         print(f"Frames : {total_frames}  |  FPS : {fps:.1f}")
@@ -205,7 +206,7 @@ class InteractiveShotDetector:
     def _update_state(self, ball_boxes, player_boxes, basket_boxes, fps) -> bool:
         """
         Stage 1 – possible: ball bottom rises above all player tops.
-        Stage 2 – confirmed: stays elevated for ≥ CONFIRM_FRAMES frames.
+        Stage 2 – confirmed: stays elevated for ≥ CONFIRM_S seconds.
 
         Returns True on the frame the shot ends (ball descends back down).
         """
@@ -221,7 +222,7 @@ class InteractiveShotDetector:
                 self._record_frame(ball_boxes, player_boxes, basket_boxes, fps)
             elif self.possible_shot:
                 self.poss_frame_count += 1
-                if self.poss_frame_count > 20:
+                if self.poss_frame_count > frames(POSSIBLE_TIMEOUT_S, fps):
                     self._cancel_possible()
             return False
 
@@ -247,7 +248,7 @@ class InteractiveShotDetector:
                 self._build_row(ball_boxes, player_boxes, basket_boxes, fps)
             )
             if above:
-                if self.poss_frame_count >= CONFIRM_FRAMES:
+                if self.poss_frame_count >= frames(CONFIRM_S, fps):
                     # ── Stage 2: confirmed ───────────────────────────────────
                     self.shot_number      += 1
                     self.shot_in_progress  = True
@@ -426,7 +427,7 @@ class InteractiveShotDetector:
         elif self.possible_shot:
             cv2.rectangle(frame, (10, 10), (760, 52), (0, 165, 255), -1)
             cv2.putText(frame,
-                        f"Possible shot … ({self.poss_frame_count}/{CONFIRM_FRAMES})",
+                        f"Possible shot … ({self.poss_frame_count}/{frames(CONFIRM_S, self.fps)})",
                         (16, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0,0,0), 2)
         else:
             cv2.putText(frame, status, (16, 36),
