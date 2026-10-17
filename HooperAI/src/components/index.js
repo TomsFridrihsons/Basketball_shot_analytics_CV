@@ -70,7 +70,7 @@ export function PrimaryButton({ label, onPress, icon, style }) {
 const styles = StyleSheet.create({
   sectionLabel: {
     fontSize: font.xs,
-    color: colors.textGhost,
+    color: colors.textDim,
     textTransform: 'uppercase',
     letterSpacing: 0.8,
     marginBottom: spacing.sm,

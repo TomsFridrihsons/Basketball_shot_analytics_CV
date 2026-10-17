@@ -19,9 +19,10 @@ export const colors = {
 
   white:      '#ffffff',
   text:       '#cccccc',
-  textMuted:  '#888888',
-  textDim:    '#555555',
-  textGhost:  '#444444',
+  // contrast on bgCard #161616 (WCAG): secondary 6.9:1, tertiary 5.2:1, ghost 3.4:1
+  textMuted:  '#a0a0a0',   // secondary text
+  textDim:    '#8a8a8a',   // tertiary text, smallest labels
+  textGhost:  '#6b6b6b',   // decorative icons and disabled only – not for text
 };
 
 export const radius = {

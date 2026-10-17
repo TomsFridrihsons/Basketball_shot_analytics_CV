@@ -137,7 +137,7 @@ cd HooperAI && npx expo start                      # app; Expo Go → exp://<lap
 
 ## 8. Ticket log (HPAI-XX)
 
-Next free ticket: **HPAI-23**. Workflow: `docs/WORKFLOW.md`.
+Next free ticket: **HPAI-24**. Workflow: `docs/WORKFLOW.md`.
 
 | Ticket | Type | Title | Status |
 |---|---|---|---|
@@ -163,6 +163,7 @@ Next free ticket: **HPAI-23**. Workflow: `docs/WORKFLOW.md`.
 | HPAI-20 | feature | New shot start trigger (hoop zone / leaves shooter) + aim check | Planned |
 | HPAI-21 | feature | Made/missed upgrades: parabola at rim height, ball hidden by the net, rim bounces | Planned |
 | HPAI-22 | feature | Measurement: rim-width scale, release speed, arc height, entry angle | Planned |
+| HPAI-23 | feature | Home screen redesign (Apple HIG): "Today" hero with makes/attempts + shot-log dots, review prompt, labelled tab bar, WCAG-contrast text colours | Done |
 
 ---
 
