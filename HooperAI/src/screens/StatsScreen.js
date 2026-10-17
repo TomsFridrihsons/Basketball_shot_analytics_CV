@@ -7,7 +7,8 @@ import { useFocusEffect } from '@react-navigation/native';
 import Svg, { Circle } from 'react-native-svg';
 import { colors, radius, spacing, font } from '../utils/theme';
 import { Card, SectionLabel, Divider } from '../components';
-import { getShots, calcStats, calcZoneStats } from '../utils/storage';
+import { getShots, calcStats, calcZoneStats, calcModelStats } from '../utils/storage';
+import { getSettings } from '../services/settings';
 
 // ── Ring chart ───────────────────────────────────────────────────────────────
 function PctRing({ pct, size = 80 }) {
@@ -70,6 +71,8 @@ export default function StatsScreen() {
   const [shots, setShots]       = useState([]);
   const [stats, setStats]       = useState({ total: 0, made: 0, missed: 0, pct: 0 });
   const [zones, setZones]       = useState([]);
+  const [model, setModel]       = useState({ labeled: 0, right: 0, pct: null });
+  const [settings, setSettings] = useState({});
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
@@ -77,6 +80,8 @@ export default function StatsScreen() {
     setShots(data);
     setStats(calcStats(data));
     setZones(calcZoneStats(data));
+    setModel(calcModelStats(data));
+    setSettings(await getSettings());
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -137,12 +142,13 @@ export default function StatsScreen() {
         <View>
           <SectionLabel>Model</SectionLabel>
           <Card style={{ padding: 0, overflow: 'hidden' }}>
-            <ModelRow label="Version"        value="lstm_v5" />
-            <ModelRow label="Threshold"      value="0.50"              valueColor={colors.green} />
-            <ModelRow label="Features"       value="18-dim LSTM" />
-            <ModelRow label="NaN handling"   value="ffill → bfill"    valueColor={colors.green} />
-            <ModelRow label="Class balance"  value="compute_class_weight" />
-            <ModelRow label="Architecture"   value="BiLSTM + attention" last />
+            <ModelRow label="Predictor"      value={settings.predictorLabel || 'Rim-pass rule (server default)'} />
+            <ModelRow label="On new videos"  value={settings.predictorAccuracy != null
+              ? `${Math.round(settings.predictorAccuracy * 100)}% (cross-validated)` : '93% (cross-validated)'} />
+            <ModelRow label="Shots you labeled" value={String(model.labeled)} />
+            <ModelRow label="Model agreed with you"
+              value={model.pct != null ? `${model.pct}% (${model.right}/${model.labeled})` : '—'}
+              valueColor={model.pct != null ? (model.pct >= 85 ? colors.green : colors.yellow) : undefined} last />
           </Card>
         </View>
       </ScrollView>

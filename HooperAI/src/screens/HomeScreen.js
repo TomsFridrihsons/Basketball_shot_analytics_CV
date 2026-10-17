@@ -45,6 +45,10 @@ export default function HomeScreen() {
         <View style={styles.logoRow}>
           <View style={styles.logoIcon}><Text style={{ fontSize: 15 }}>🏀</Text></View>
           <Text style={styles.logoText}>Hooper<Text style={{ color: colors.orange }}>AI</Text></Text>
+          <TouchableOpacity onPress={() => navigation.navigate('Settings')} style={{ marginLeft: 'auto', padding: 4 }}
+            accessibilityLabel="Settings">
+            <Ionicons name="settings-outline" size={20} color={colors.textMuted} />
+          </TouchableOpacity>
         </View>
         <Text style={styles.headerSub}>
           {new Date().toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}
@@ -99,7 +103,11 @@ export default function HomeScreen() {
                   <Text style={styles.shotNum}>{i + 1}</Text>
                   <OutcomeChip outcome={shot.outcome} />
                   <View style={styles.shotInfo}>
-                    <Text style={styles.shotZone}>{shot.zone || 'Unknown zone'}</Text>
+                    <Text style={styles.shotZone}>
+                      {shot.zone || (shot.videoTime != null
+                        ? `Shot ${shot.shotNumber} · ${Math.floor(shot.videoTime / 60)}:${String(Math.floor(shot.videoTime % 60)).padStart(2, '0')}${shot.labeled ? '' : ' · unlabeled'}`
+                        : 'Unknown zone')}
+                    </Text>
                     <Text style={styles.shotTime}>{formatTimeAgo(shot.timestamp)}</Text>
                   </View>
                   <ConfBadge conf={shot.confidence || 0} />

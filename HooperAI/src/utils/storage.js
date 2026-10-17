@@ -29,6 +29,70 @@ export async function clearShots() {
   await AsyncStorage.removeItem(SHOTS_KEY);
 }
 
+// ── Analyzed sessions (from the laptop server) ──────────────────────────────
+
+/** Shot record for the Home/Stats screens from a server shot. */
+function toShot(sessionId, s, fps) {
+  const labeled = s.label != null;
+  const predicted = s.prediction === 1 ? 'made' : 'missed';
+  const outcome = labeled ? (s.label === 1 ? 'made' : 'missed') : predicted;
+  return {
+    id: `${sessionId}-${s.shot_number}`,
+    sessionId,
+    shotNumber: s.shot_number,
+    outcome,
+    predicted,
+    labeled,
+    correct: labeled ? outcome === predicted : null,
+    // certainty of the predicted outcome, in % (ConfBadge)
+    confidence: Math.round(Math.max(s.probability, 1 - s.probability) * 100),
+    videoTime: fps ? (s.start_frame - 1) / fps : null,
+    zone: null,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/** Store all shots of an analyzed session (replaces earlier copies of it). */
+export async function saveSession(sessionId, result) {
+  try {
+    const shots = (await getShots()).filter(s => s.sessionId !== sessionId);
+    const fresh = result.shots.map(s => toShot(sessionId, s, result.fps)).reverse();
+    const next = [...fresh, ...shots];
+    await AsyncStorage.setItem(SHOTS_KEY, JSON.stringify(next));
+
+    const raw = await AsyncStorage.getItem(SESSION_KEY);
+    const sessions = (raw ? JSON.parse(raw) : []).filter(s => s.id !== sessionId);
+    sessions.unshift({
+      id: sessionId, video: result.video, total: result.shots.length,
+      timestamp: new Date().toISOString(),
+    });
+    await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(sessions.slice(0, 200)));
+    return next;
+  } catch (e) {
+    console.error('saveSession error', e);
+    return [];
+  }
+}
+
+/** Apply your made/missed label to a stored shot. */
+export async function labelShot(sessionId, shotNumber, label) {
+  const shots = await getShots();
+  const next = shots.map(s => {
+    if (s.sessionId !== sessionId || s.shotNumber !== shotNumber) return s;
+    const outcome = label === 1 ? 'made' : 'missed';
+    return { ...s, outcome, labeled: true, correct: outcome === s.predicted };
+  });
+  await AsyncStorage.setItem(SHOTS_KEY, JSON.stringify(next));
+  return next;
+}
+
+/** How often the model agreed with your labels. */
+export function calcModelStats(shots) {
+  const labeled = shots.filter(s => s.labeled);
+  const right = labeled.filter(s => s.correct).length;
+  return { labeled: labeled.length, right, pct: labeled.length ? Math.round((right / labeled.length) * 100) : null };
+}
+
 export function formatTimeAgo(isoString) {
   const diff = Date.now() - new Date(isoString).getTime();
   const mins = Math.floor(diff / 60000);

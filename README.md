@@ -48,11 +48,16 @@ HooperAI/                  repo root
 │   │   ├── plot_training.py   plot an Ultralytics results.csv
 │   │   └── export_tflite.py   export the detector to INT8 TFLite
 │   ├── app/
-│   │   ├── server.py          laptop test bench: local web UI + JSON API (FastAPI)
+│   │   ├── server.py          laptop test bench + mobile backend: web UI + JSON API (FastAPI)
+│   │   ├── auth.py            API key / Firebase ID token authentication
+│   │   ├── firestore_sync.py  mirror session results to Firestore (Firebase mode)
 │   │   └── static/            the UI (index.html, app.js, app.css)
 │   └── ui/
 │       └── infer_ui.py        Tkinter launcher for lstm_infer.py
-├── HooperAI/              Expo mobile app (UI prototype, not yet connected to the model)
+├── HooperAI/              Expo mobile app – records/picks videos, analyzed by the laptop server
+├── tests/                 server API tests (pytest, no GPU/Firebase needed)
+├── secrets/               server.env + Firebase service account (git-ignored; *.example tracked)
+├── firestore.rules        Firestore security rules (users read only their own sessions)
 ├── notebooks/experiments/ Colab notebook for training the YOLO detector
 ├── docs/                  Colab notebook setup guide
 ├── env.example            Roboflow settings for the notebook (copy to .env)
@@ -155,13 +160,21 @@ listed in `server.py`), so the mobile app can call the same endpoints. Set
 
 ### Mobile app
 
+The phone records or picks a video, uploads it in original quality to the laptop server,
+and shows the shots to label. Setup (API key now, Tailscale, Firebase later – all free):
+[`docs/MOBILE_SETUP.md`](docs/MOBILE_SETUP.md).
+
 ```bash
 cd HooperAI
 npm install
 npx expo start
 ```
 
-See `HooperAI/README.md` for connecting it to the inference pipeline.
+### Tests
+
+```bash
+python -m pytest tests -q
+```
 
 ## Known issues
 

@@ -3,7 +3,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { StatusBar } from 'expo-status-bar';
-import TabNavigator from './src/navigation/TabNavigator';
+import RootNavigator from './src/navigation/RootNavigator';
 
 export default function App() {
   return (
@@ -11,7 +11,7 @@ export default function App() {
       <SafeAreaProvider>
         <NavigationContainer>
           <StatusBar style="light" backgroundColor="#0a0a0a" />
-          <TabNavigator />
+          <RootNavigator />
         </NavigationContainer>
       </SafeAreaProvider>
     </GestureHandlerRootView>
