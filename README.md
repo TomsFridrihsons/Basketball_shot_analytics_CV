@@ -1,150 +1,120 @@
 # HooperAI 🏀
 
-A basketball detection and analytics project using YOLO (You Only Look Once) object detection models. This project focuses on detecting basketballs, hoops/baskets, and players in video footage.
-
-## 📋 Project Overview
-
-HooperAI is a computer vision project that uses deep learning to detect and track basketball-related objects in videos. The project includes:
-
-- **Object Detection**: Detects basketballs, hoops/baskets, and players
-- **Trained Models**: Pre-trained YOLO models ready for inference
-- **Datasets**: Two annotated datasets for training and validation
-
-## 🗂️ Project Structure
+Basketball shot analytics from video. A YOLO detector finds the **ball, basket and
+players** in every frame; a shot-detection state machine cuts each shot into a
+sequence of per-frame features; an **LSTM** predicts whether the shot was made or
+missed. A React Native (Expo) companion app lives in `HooperAI/`.
 
 ```
-HooperAI/
-├── models/                    # Trained model weights
-│   ├── basketball-v1-best.pt
-│   ├── basketball-v1-last.pt
-│   ├── basketball-v3-best.pt
-│   └── basketball-v3-last.pt
-├── Hooper-2/                 # Dataset 1: Ball, Hoop, Player detection
-│   ├── data.yaml
-│   ├── train/               # Training images and labels
-│   └── valid/               # Validation images and labels
-├── HooperAnalytic-1/         # Dataset 2: Ball, Basket, Player detection
-│   ├── data.yaml
-│   ├── train/               # Training images and labels
-│   └── valid/               # Validation images and labels
-├── runs/                     # Training runs (gitignored)
-├── archives/                 # Archived training runs
-└── new_vids/                 # Video files for processing
+video ──► YOLO (ball / basket / player) ──► shot detector ──► 18 features per frame ──► LSTM ──► MADE / MISSED
 ```
 
-## 🚀 Getting Started
+## Project structure
 
-### Prerequisites
+```
+HooperAI/                  repo root
+├── scripts/
+│   ├── paths.py           shared paths – every script takes its defaults from here
+│   ├── labeling/
+│   │   └── shot_labeler.py    play a video, auto-detect shots, label made/missed → CSV
+│   ├── lstm/
+│   │   ├── lstm_train.py      train the shot-outcome LSTM from labeled CSVs
+│   │   ├── lstm_infer.py      YOLO + LSTM inference on a video (annotated video, CSV, JSON)
+│   │   └── lstm_eval.py       run inference and compare against a labeled CSV (confusion matrix)
+│   ├── yolo/
+│   │   ├── yolo_eval.py       per-class precision / recall / mAP on a YOLO test set
+│   │   ├── compare_models.py  compare two YOLO models on one video
+│   │   ├── show_detections.py preview YOLO boxes on a video
+│   │   ├── plot_training.py   plot an Ultralytics results.csv
+│   │   └── export_tflite.py   export the detector to INT8 TFLite
+│   └── ui/
+│       └── infer_ui.py        Tkinter launcher for lstm_infer.py
+├── HooperAI/              Expo mobile app (UI prototype, not yet connected to the model)
+├── docs/                  extra guides (Colab training)
+├── data/                  local only, except labeled CSVs (see below)
+├── archives/              older models and zipped datasets/runs (local only)
+├── runs/                  Ultralytics training output (local only)
+└── requirements.txt
+```
 
-- Python 3.8+
-- PyTorch
-- Ultralytics YOLO
+### Data layout
 
-### Installation
+`data/` is git-ignored except `data/processed/annotations/*.csv`.
 
-1. Clone the repository:
+| Folder | Contents |
+|---|---|
+| `data/raw/videos/` | source videos |
+| `data/raw/model_dataset/` | YOLO dataset (`data.yaml`, train/valid/test) |
+| `data/processed/annotations/` | labeled shot CSVs – the LSTM training data (tracked) |
+| `data/model/` | current YOLO weights and LSTM models (`*_best.keras`, `*_scaler.pkl`, `*_config.pkl`) |
+| `data/processed/predictions/` | output of `lstm_infer.py` |
+| `data/processed/eval/` | output of `lstm_eval.py` |
+
+## Setup
+
+Python 3.10+ (developed on 3.13).
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/HooperAI.git
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # Linux / macOS
+pip install -r requirements.txt
+```
+
+For GPU detection, install the CUDA build of PyTorch from <https://pytorch.org/get-started/locally/>.
+Check it with `python -c "import torch; print(torch.cuda.is_available())"`.
+
+Model weights and videos are not in git. Copy them into `data/model/` and `data/raw/videos/`.
+
+## Workflow
+
+Run everything from the repo root. Each script has a configuration block near the
+top; the default paths come from `scripts/paths.py`.
+
+1. **Label shots:** set `VIDEO_PATH` / `OUTPUT_CSV` in `shot_labeler.py`, then
+   ```bash
+   python scripts/labeling/shot_labeler.py
+   ```
+   Keys: `1` made, `0` missed, `2` discard, `x` cancel current shot, `q` quit. The CSV is
+   appended to, so labeling can span sessions.
+2. **Train:** add the CSV to `DATA_PATHS` and set `MODEL_NAME` in `lstm_train.py`, then
+   ```bash
+   python scripts/lstm/lstm_train.py
+   ```
+3. **Predict on a video:**
+   ```bash
+   python scripts/lstm/lstm_infer.py
+   python scripts/ui/infer_ui.py      # same, with a GUI
+   ```
+4. **Evaluate against labels:**
+   ```bash
+   python scripts/lstm/lstm_eval.py --video data/raw/videos/<video>.mp4 --gt data/processed/annotations/<labels>.csv
+   ```
+
+### Mobile app
+
+```bash
 cd HooperAI
+npm install
+npx expo start
 ```
 
-2. Create a virtual environment:
-```bash
-python -m venv .venv1
-.venv1\Scripts\activate  # On Windows
-# or
-source .venv1/bin/activate  # On Linux/Mac
-```
+See `HooperAI/README.md` for connecting it to the inference pipeline.
 
-3. Install dependencies:
-```bash
-pip install ultralytics
-pip install torch torchvision
-```
+## Known issues
 
-## 📊 Datasets
+- `lstm_train.py` augments shots **before** the train/test split, so copies of a shot
+  land in both sets and test scores are inflated. Split by shot first.
+- The optimal threshold is picked on the test set; use a validation set instead.
+- Features are raw pixel coordinates, so models don't transfer well between camera setups.
+- Shot confirmation differs between `shot_labeler.py` (`CONFIRM_FRAMES = 10`) and
+  `lstm_infer.py` (23 frames).
 
-### Hooper-2 Dataset
-- **Classes**: Ball, Hoop, Player
-- **Training Images**: 84
-- **Validation Images**: 13
-- **Source**: [Roboflow Universe](https://universe.roboflow.com/basketball-dataset/hooper)
+## Branches
 
-### HooperAnalytic-1 Dataset
-- **Classes**: Ball, Basket, Player
-- **Training Images**: 96
-- **Validation Images**: 15
-- **Source**: [Roboflow Universe](https://universe.roboflow.com/basketball-dataset/hooperanalytic)
+`main` is stable; do day-to-day work on `development` or feature branches and open a PR into `main`.
 
-## 🤖 Using Trained Models
+## License
 
-### Load and Use a Model
-
-```python
-from ultralytics import YOLO
-
-# Load the best model
-model = YOLO('models/basketball-v1-best.pt')
-
-# Run inference on an image
-results = model('path/to/image.jpg')
-
-# Run inference on a video
-results = model('path/to/video.mp4')
-
-# Display results
-results[0].show()
-```
-
-### Training a New Model
-
-```python
-from ultralytics import YOLO
-
-# Load a base model
-model = YOLO('yolov8n.pt')  # or yolov8s.pt, yolov8m.pt, etc.
-
-# Train on Hooper-2 dataset
-results = model.train(
-    data='Hooper-2/data.yaml',
-    epochs=100,
-    imgsz=640,
-    batch=16
-)
-```
-
-## 📈 Model Performance
-
-The project includes several trained models:
-
-- **basketball-v1**: Initial training run
-- **basketball-v3**: Improved version
-- **basketball-finetune**: Fine-tuned models
-
-Check the `runs/detect/` directory for training metrics and visualizations.
-
-## 🛠️ Development
-
-### Adding New Features
-
-1. Create feature branches from `main`
-2. Make your changes
-3. Test thoroughly
-4. Submit a pull request
-
-### Training New Models
-
-Training outputs are automatically saved to `runs/detect/` (gitignored). To track important training runs, copy model weights to the `models/` directory.
-
-## 📝 License
-
-The datasets are licensed under CC BY 4.0. Please refer to the original dataset sources for specific licensing terms.
-
-## 🙏 Acknowledgments
-
-- Datasets from [Roboflow Universe](https://universe.roboflow.com/)
-- Built with [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)
-
-## 📧 Contact
-
-For questions or contributions, please open an issue or submit a pull request.
+Datasets from [Roboflow Universe](https://universe.roboflow.com/) are CC BY 4.0.
+Built with [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) and TensorFlow/Keras.

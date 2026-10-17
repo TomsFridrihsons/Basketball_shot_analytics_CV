@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "HooperAI",
+    "slug": "hooperai",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0a0a0a"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0a0a0a"
+      },
+      "package": "com.hooperai.app",
+      "permissions": ["CAMERA", "RECORD_AUDIO", "READ_EXTERNAL_STORAGE", "WRITE_EXTERNAL_STORAGE"]
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.hooperai.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "HooperAI needs the camera to track shots in real time.",
+        "NSMicrophoneUsageDescription": "Microphone is required for video recording."
+      }
+    },
+    "plugins": [
+      ["expo-camera", { "cameraPermission": "HooperAI needs the camera to track your shots." }]
+    ]
+  }
+}
