@@ -2,7 +2,7 @@
 
 Living record of what the project is, what was decided and why, what is done, and
 what is next. Update it in the same commit as any change that alters a decision,
-a result or the status below. Last updated: **2026-10-17** (HPAI-16).
+a result or the status below. Last updated: **2026-10-17** (HPAI-17).
 
 ---
 
@@ -137,7 +137,7 @@ cd HooperAI && npx expo start                      # app; Expo Go → exp://<lap
 
 ## 8. Ticket log (HPAI-XX)
 
-Next free ticket: **HPAI-17**. Workflow: `docs/WORKFLOW.md`.
+Next free ticket: **HPAI-23**. Workflow: `docs/WORKFLOW.md`.
 
 | Ticket | Type | Title | Status |
 |---|---|---|---|
@@ -157,6 +157,12 @@ Next free ticket: **HPAI-17**. Workflow: `docs/WORKFLOW.md`.
 | HPAI-14 | feature | "Not a shot" label and manually added shots | Done |
 | HPAI-15 | chore | `progress_context.md`, HPAI ticket workflow, release to `main` | Done |
 | HPAI-16 | chore | Plan: paid tiers, video retention, training-data collection (section 9) | Done |
+| HPAI-17 | chore | Detection roadmap (section 10): selected work + parked items | Done |
+| HPAI-18 | feature | Per-object confidence thresholds; detection cache keeps confidences; baseline evaluation | Planned |
+| HPAI-19 | feature | Better ball tracking: outlier cleaning, parabola gap filling, time-based (fps-independent) detector | Planned |
+| HPAI-20 | feature | New shot start trigger (hoop zone / leaves shooter) + aim check | Planned |
+| HPAI-21 | feature | Made/missed upgrades: parabola at rim height, ball hidden by the net, rim bounces | Planned |
+| HPAI-22 | feature | Measurement: rim-width scale, release speed, arc height, entry angle | Planned |
 
 ---
 
@@ -273,3 +279,53 @@ Rules:
 | Tiers | entitlement model + server-side quotas; RevenueCat / Play Billing; paywall screen |
 | Pro features | trends screen; highlight clip export; shot zones |
 | Legal | privacy policy, terms, in-app consent texts |
+
+---
+
+## 10. Detection roadmap (2026-10-17, from the research in the conversation)
+
+Sources: avishah3/AI-Basketball-Shot-Detection-Tracker (hoop-zone trigger, line at rim
+height, track cleaning), Roboflow "AI basketball shot evaluator" / aarnavshah12/shot-tracker
+(release from the wrist, parabola aim check, net-occlusion fall speed, rim bounces,
+rim-width scale), Roboflow player identification (tracking, team clustering, jersey
+numbers), court-keypoint homography papers (KaliCalib, Basketball-SORT, BasketTracking),
+pose-based form analysis (mc261670164/AI-basketball-analysis), TrackNet.
+
+### 10.1 Selected – in progress (owner, 2026-10-17)
+
+| Ticket | Improvement |
+|---|---|
+| HPAI-18 | **Separate confidence thresholds per object** (ball lower than basket/player); cache all boxes ≥ 0.25 with their confidence so thresholds can be tuned without re-running YOLO; baseline numbers on the labeled videos |
+| HPAI-19 | **Better ball tracking**: drop jumpy / wrongly shaped ball boxes, fill gaps with a fitted parabola, express detector timings in seconds (60 fps videos) |
+| HPAI-20 | **New start trigger** (ball enters the zone above the hoop, or leaves the shooter going up) + **aim check** (fitted parabola must point at the rim) |
+| HPAI-21 | **Made/missed upgrades**: parabola through several points at rim height; **ball hidden by the net** (fall speed when it reappears); **rim bounces** |
+| HPAI-22 | **Measurement**: rim width (45.7 cm) → metres; release speed, arc height, entry angle |
+
+Every step is measured before it is kept: (a) made/missed on the 184 labeled shots
+(leave-one-video-out), (b) end to end on `20250711_171647` (145 labeled shots) and the
+18:22 app session (18 labeled shots): shots found / missed / false, made-missed accuracy.
+After HPAI-18…22: **revisit the order of the remaining items** (owner).
+
+### 10.2 Parked – do not forget (owner: "leave B and C for later")
+
+**B. Telling players apart**
+- B1. Track players across frames (Ultralytics BoT-SORT, `model.track`).
+- B2. Who shot: tracked player nearest the ball at release / whose wrist it left (pose).
+- B3. "Which one is you?": tap a player once in the review screen, then match the rest of
+  the session by appearance (OSNet re-ID or SigLIP embeddings + clustering).
+- B4. Teams: unsupervised appearance clustering into two teams → per-player / per-team
+  FG% (Coach tier).
+- Avoid face recognition (biometric data under GDPR).
+
+**C. New stats and features**
+- C1. Shot metrics shown in the app (release angle, arc, entry angle, speed) – the
+  measurement itself is HPAI-22; presentation / Pro packaging is parked.
+- C2. Shot zones + shot chart via a one-time 4-tap court calibration (free-throw lane
+  corners → homography → 9 zones).
+- C3. Shooting form from pose (YOLO11-pose): elbow / knee angles, release height,
+  consistency, made vs missed form.
+- C4. Detection quality metrics from app labels (missed shots added, "not a shot")
+  tracked over time.
+- C5. Retrain YOLO with the University of Arizona "Basketball Shooting Robot" dataset
+  (~9.8k images) + frame crops from app-labeled shots; optional "ball in net" class.
+- C6. Second YOLO pass on a full-resolution crop around the hoop (small ball).
