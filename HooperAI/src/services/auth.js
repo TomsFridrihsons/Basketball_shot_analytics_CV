@@ -3,7 +3,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { initializeApp, getApps } from 'firebase/app';
 import {
-  initializeAuth, getReactNativePersistence, onAuthStateChanged,
+  initializeAuth, getAuth, getReactNativePersistence, onAuthStateChanged,
   signInWithEmailAndPassword, createUserWithEmailAndPassword,
   sendPasswordResetEmail, signOut as fbSignOut, deleteUser,
 } from 'firebase/auth';
@@ -15,8 +15,14 @@ function getAuthInstance() {
   if (!isFirebaseConfigured) return null;
   if (!auth) {
     const app = getApps()[0] || initializeApp(FIREBASE_CONFIG);
-    // Keeps the user signed in between app launches
-    auth = initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) });
+    try {
+      // Keeps the user signed in between app launches
+      auth = initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) });
+    } catch (e) {
+      // A hot reload re-runs this module while Firebase keeps its auth instance
+      if (e?.code !== 'auth/already-initialized') throw e;
+      auth = getAuth(app);
+    }
   }
   return auth;
 }
