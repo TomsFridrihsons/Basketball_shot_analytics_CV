@@ -6,6 +6,7 @@ import {
   initializeAuth, getAuth, getReactNativePersistence, onAuthStateChanged,
   signInWithEmailAndPassword, createUserWithEmailAndPassword,
   sendPasswordResetEmail, signOut as fbSignOut, deleteUser,
+  EmailAuthProvider, reauthenticateWithCredential,
 } from 'firebase/auth';
 import { FIREBASE_CONFIG, isFirebaseConfigured } from '../config';
 
@@ -56,8 +57,13 @@ export const resetPassword = (email) => sendPasswordResetEmail(getAuthInstance()
 
 export const signOut = () => (getAuthInstance() ? fbSignOut(getAuthInstance()) : Promise.resolve());
 
-/** Delete the signed-in Firebase account (Firebase may ask for a recent sign-in first). */
-export const deleteAccount = () => deleteUser(currentUser());
+/** Delete the signed-in account. Firebase only deletes after a recent sign-in, so
+ *  confirm the password first instead of making people sign out and back in. */
+export async function deleteAccount(password) {
+  const user = currentUser();
+  await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, password));
+  await deleteUser(user);
+}
 
 /** Human-readable message for Firebase auth error codes. */
 export function authErrorMessage(e) {
@@ -72,6 +78,7 @@ export function authErrorMessage(e) {
     'auth/network-request-failed': 'No internet connection.',
     'auth/too-many-requests': 'Too many attempts – try again later.',
     'auth/requires-recent-login': 'For your security, sign out and sign in again, then delete the account.',
+    'auth/missing-password': 'Enter your password.',
   };
   return map[code] || e?.message || 'Something went wrong.';
 }
