@@ -1,16 +1,53 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, ActivityIndicator, Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import Constants from 'expo-constants';
 import { colors, radius, spacing, font } from '../utils/theme';
-import { Card, SectionLabel, Divider } from '../components';
+import { Divider } from '../components';
 import { getSettings, saveSettings } from '../services/settings';
 import { isFirebaseConfigured } from '../config';
-import { currentUser, signOut } from '../services/auth';
+import { currentUser, signOut, deleteAccount, authErrorMessage } from '../services/auth';
 import * as api from '../services/api';
+
+// Grouped list, iOS style. Changes save as you make them – there is no Save button
+// to forget. The laptop is checked on open, so the predictor list is always there.
+
+function Group({ title, footer, children }) {
+  return (
+    <View>
+      {title && <Text style={styles.groupTitle} accessibilityRole="header">{title}</Text>}
+      <View style={styles.group}>{children}</View>
+      {footer && <Text style={styles.groupFooter}>{footer}</Text>}
+    </View>
+  );
+}
+
+function Field({ label, ...input }) {
+  return (
+    <View style={styles.field}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      <TextInput style={styles.input} placeholderTextColor={colors.textGhost}
+        autoCapitalize="none" autoCorrect={false} clearButtonMode="while-editing"
+        accessibilityLabel={label} {...input} />
+    </View>
+  );
+}
+
+function ActionRow({ label, icon, onPress, destructive, busy }) {
+  const color = destructive ? colors.red : colors.white;
+  return (
+    <TouchableOpacity style={styles.actionRow} onPress={onPress} disabled={busy} activeOpacity={0.7}
+      accessibilityRole="button">
+      {busy ? <ActivityIndicator size="small" color={colors.textMuted} />
+        : <Ionicons name={icon} size={20} color={color} />}
+      <Text style={[styles.actionText, { color }]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
 
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
@@ -18,141 +55,166 @@ export default function SettingsScreen() {
   const [serverUrl, setServerUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [predictor, setPredictor] = useState(null);
-  const [check, setCheck] = useState(null);       // {ok, text, status}
-  const [testing, setTesting] = useState(false);
+  const [conn, setConn] = useState({ state: 'checking' });   // checking | ok | error
+  const [deleting, setDeleting] = useState(false);
+  const loaded = useRef(false);
   const user = currentUser();
+
+  const check = useCallback(async () => {
+    setConn({ state: 'checking' });
+    try {
+      const h = await api.health();
+      const st = await api.status();
+      setConn({
+        state: 'ok', status: st,
+        detail: [st.gpu ? 'GPU' : 'CPU', h.firestore ? 'cloud sync on' : null].filter(Boolean).join(' · '),
+      });
+    } catch (e) {
+      setConn({ state: 'error', detail: e.message });
+    }
+  }, []);
 
   useEffect(() => {
     getSettings().then(s => {
       setServerUrl(s.serverUrl);
       setApiKey(s.apiKey);
       setPredictor(s.predictor);
+      loaded.current = true;
+      check();
     });
-  }, []);
+  }, [check]);
 
-  const testConnection = async () => {
-    setTesting(true);
-    setCheck(null);
-    try {
-      await saveSettings({ serverUrl, apiKey });
-      const h = await api.health();
-      const st = await api.status();
-      setCheck({ ok: true, status: st,
-                 text: `Connected · ${st.gpu ? 'GPU' : 'CPU'} · auth: ${h.auth_mode}${h.firestore ? ' · Firestore sync on' : ''}` });
-    } catch (e) {
-      setCheck({ ok: false, text: e.message });
-    } finally {
-      setTesting(false);
-    }
-  };
+  // save as you type; re-check the laptop once typing pauses
+  useEffect(() => {
+    if (!loaded.current) return undefined;
+    const t = setTimeout(async () => { await saveSettings({ serverUrl, apiKey }); check(); }, 800);
+    return () => clearTimeout(t);
+  }, [serverUrl, apiKey, check]);
 
   const choosePredictor = async (p) => {
     setPredictor(p.config);
     await saveSettings({ predictor: p.config, predictorLabel: p.label, predictorAccuracy: p.unseen_video_accuracy });
   };
 
-  const save = async () => {
-    await saveSettings({ serverUrl, apiKey });
-    navigation.goBack();
-  };
+  const confirmSignOut = () => Alert.alert('Sign out of HooperAI?', 'Your sessions stay on your laptop.', [
+    { text: 'Cancel', style: 'cancel' },
+    { text: 'Sign Out', style: 'destructive', onPress: () => signOut() },
+  ]);
+
+  const confirmDelete = () => Alert.alert(
+    'Delete your account?',
+    'This permanently deletes your HooperAI account. Videos and sessions on your laptop are not removed – delete them there if you want them gone. This can\'t be undone.',
+    [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete Account', style: 'destructive', onPress: async () => {
+          setDeleting(true);
+          try { await deleteAccount(); }   // RootNavigator returns to sign-in
+          catch (e) { Alert.alert('Account not deleted', authErrorMessage(e)); }
+          finally { setDeleting(false); }
+        },
+      },
+    ]);
+
+  const predictors = conn.status?.predictors || [];
+  const selected = predictor || conn.status?.default_predictor;
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} accessibilityLabel="Back">
-          <Ionicons name="chevron-back" size={22} color={colors.textMuted} />
+        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}
+          accessibilityRole="button" accessibilityLabel="Back">
+          <Ionicons name="chevron-back" size={26} color={colors.white} />
         </TouchableOpacity>
-        <Text style={styles.title}>Settings</Text>
-        <TouchableOpacity onPress={save}><Text style={styles.saveText}>Save</Text></TouchableOpacity>
+        <Text style={styles.title} accessibilityRole="header">Settings</Text>
+        <View style={styles.back} />
       </View>
 
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <View>
-          <SectionLabel>Laptop server</SectionLabel>
-          <Card style={{ gap: spacing.md }}>
-            <View>
-              <Text style={styles.label}>Address</Text>
-              <TextInput
-                style={styles.input} value={serverUrl} onChangeText={setServerUrl}
-                placeholder="http://192.168.1.100:8000" placeholderTextColor={colors.textGhost}
-                autoCapitalize="none" autoCorrect={false} keyboardType="url"
-              />
-              <Text style={styles.help}>
-                Same Wi-Fi: the laptop's IP. Away from home: its Tailscale address (free), e.g. http://100.x.y.z:8000.
-              </Text>
+        {/* Account first: who you are */}
+        {isFirebaseConfigured && (
+          <Group title="Account">
+            <View style={styles.accountRow}>
+              <View style={styles.avatar}>
+                <Text style={styles.avatarText}>{(user?.email || '?')[0].toUpperCase()}</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rowLabel} numberOfLines={1}>{user?.email || '–'}</Text>
+                <Text style={styles.rowSub}>Signed in with email</Text>
+              </View>
             </View>
-            <View>
-              <Text style={styles.label}>API key</Text>
-              <TextInput
-                style={styles.input} value={apiKey} onChangeText={setApiKey}
-                placeholder="value of HOOPER_API_KEY on the laptop" placeholderTextColor={colors.textGhost}
-                autoCapitalize="none" autoCorrect={false} secureTextEntry
-              />
-              {isFirebaseConfigured && (
-                <Text style={styles.help}>
-                  Only needed while the laptop server has no Firebase service account (auth: api_key).
-                </Text>
-              )}
-            </View>
-            <TouchableOpacity style={styles.secondaryBtn} onPress={testConnection} disabled={testing}>
-              {testing ? <ActivityIndicator color={colors.orange} size="small" />
-                : <Ionicons name="pulse-outline" size={16} color={colors.text} />}
-              <Text style={styles.secondaryText}>Test connection</Text>
-            </TouchableOpacity>
-            {check && (
-              <Text style={[styles.checkText, { color: check.ok ? colors.green : colors.orange }]}>{check.text}</Text>
-            )}
-          </Card>
-        </View>
-
-        {check?.status?.predictors?.length > 0 && (
-          <View>
-            <SectionLabel>Predictor</SectionLabel>
-            <Card style={{ padding: 0, overflow: 'hidden' }}>
-              {check.status.predictors.map((p, i, all) => {
-                const selected = (predictor || check.status.default_predictor) === p.config;
-                return (
-                  <View key={p.config}>
-                    <TouchableOpacity style={styles.optionRow} onPress={() => choosePredictor(p)}>
-                      <Ionicons name={selected ? 'radio-button-on' : 'radio-button-off'} size={18}
-                        color={selected ? colors.orange : colors.textGhost} />
-                      <Text style={styles.optionText}>{p.label}</Text>
-                      {p.unseen_video_accuracy != null && (
-                        <Text style={styles.optionMeta}>{Math.round(p.unseen_video_accuracy * 100)}% on new videos</Text>
-                      )}
-                    </TouchableOpacity>
-                    {i < all.length - 1 && <Divider />}
-                  </View>
-                );
-              })}
-            </Card>
-          </View>
+            <Divider style={styles.inset} />
+            <ActionRow label="Sign Out" icon="log-out-outline" onPress={confirmSignOut} />
+          </Group>
         )}
 
-        <View>
-          <SectionLabel>Account</SectionLabel>
-          <Card style={{ gap: spacing.sm }}>
-            {isFirebaseConfigured ? (
-              <>
-                <Text style={styles.label}>Signed in as</Text>
-                <Text style={styles.value}>{user?.email || '—'}</Text>
-                <TouchableOpacity style={styles.secondaryBtn} onPress={() =>
-                  Alert.alert('Sign out?', '', [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Sign out', style: 'destructive', onPress: () => signOut() },
-                  ])}>
-                  <Ionicons name="log-out-outline" size={16} color={colors.text} />
-                  <Text style={styles.secondaryText}>Sign out</Text>
-                </TouchableOpacity>
-              </>
-            ) : (
-              <Text style={styles.help}>
-                Firebase is not configured yet, so there is no sign-in. The app uses the API key above.
-                Add the Firebase web config to HooperAI/.env to turn accounts on.
+        {/* Laptop: live status, then the two fields that change it */}
+        <Group title="Laptop server"
+          footer="On the same Wi-Fi use the laptop's address, e.g. http://192.168.1.100:8000. Away from home use its Tailscale address, e.g. http://100.x.y.z:8000.">
+          <TouchableOpacity style={styles.statusRow} onPress={check} activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={conn.state === 'ok' ? `Connected. ${conn.detail}` : conn.state === 'error' ? 'Not connected. Check again' : 'Checking the laptop'}>
+            {conn.state === 'checking'
+              ? <ActivityIndicator size="small" color={colors.textMuted} />
+              : <Ionicons name={conn.state === 'ok' ? 'checkmark-circle' : 'alert-circle'} size={22}
+                  color={conn.state === 'ok' ? colors.green : colors.yellow} />}
+            <View style={{ flex: 1 }}>
+              <Text style={styles.rowLabel}>
+                {conn.state === 'ok' ? 'Connected' : conn.state === 'error' ? 'Not connected' : 'Checking…'}
               </Text>
-            )}
-          </Card>
-        </View>
+              {!!conn.detail && <Text style={styles.rowSub} numberOfLines={2}>{conn.detail}</Text>}
+            </View>
+            {conn.state === 'error' && <Text style={styles.rowAction}>Check again</Text>}
+          </TouchableOpacity>
+          <Divider style={styles.inset} />
+          <Field label="Address" value={serverUrl} onChangeText={setServerUrl}
+            placeholder="http://192.168.1.100:8000" keyboardType="url" textContentType="URL" />
+          {(!isFirebaseConfigured || apiKey) && (
+            <>
+              <Divider style={styles.inset} />
+              <Field label="API key" value={apiKey} onChangeText={setApiKey}
+                placeholder="HOOPER_API_KEY from the laptop" secureTextEntry />
+            </>
+          )}
+        </Group>
+
+        {/* Predictor: a choice, so a checkmark list, not a text field */}
+        {predictors.length > 0 && (
+          <Group title="Made / missed predictor"
+            footer="Accuracy is measured on videos the predictor never saw. The default suits most sessions.">
+            {predictors.map((p, i) => {
+              const on = selected === p.config;
+              return (
+                <View key={p.config}>
+                  <TouchableOpacity style={styles.optionRow} onPress={() => choosePredictor(p)} activeOpacity={0.7}
+                    accessibilityRole="radio" accessibilityState={{ checked: on }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.rowLabel}>{p.label}</Text>
+                      {p.unseen_video_accuracy != null && (
+                        <Text style={styles.rowSub}>{Math.round(p.unseen_video_accuracy * 100)}% accurate</Text>
+                      )}
+                    </View>
+                    {on && <Ionicons name="checkmark" size={22} color={colors.orange} />}
+                  </TouchableOpacity>
+                  {i < predictors.length - 1 && <Divider style={styles.inset} />}
+                </View>
+              );
+            })}
+          </Group>
+        )}
+
+        {isFirebaseConfigured ? (
+          <Group footer="Deleting your account removes your sign-in. Sessions on your laptop stay until you delete them there.">
+            <ActionRow label="Delete Account" icon="trash-outline" destructive busy={deleting} onPress={confirmDelete} />
+          </Group>
+        ) : (
+          <Group title="Account"
+            footer="Accounts are off because Firebase isn't configured. The app talks to the laptop with the API key above.">
+            <View style={styles.optionRow}><Text style={styles.rowSub}>No account</Text></View>
+          </Group>
+        )}
+
+        <Text style={styles.version}>HooperAI {Constants.expoConfig?.version || ''}</Text>
       </ScrollView>
     </View>
   );
@@ -160,29 +222,38 @@ export default function SettingsScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bgScreen },
-  header: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
-    paddingHorizontal: spacing.lg, paddingBottom: spacing.md,
-    borderBottomWidth: 0.5, borderBottomColor: '#1e1e1e',
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.xs, minHeight: 48 },
+  back: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  title: { flex: 1, fontSize: 17, fontWeight: '600', color: colors.white, textAlign: 'center' },
+  content: { padding: spacing.lg, gap: spacing.xxl, paddingBottom: 48 },
+
+  groupTitle: {
+    fontSize: font.sm, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.6,
+    marginBottom: spacing.sm, paddingHorizontal: spacing.lg,
   },
-  title: { flex: 1, fontSize: font.md, fontWeight: '500', color: colors.white },
-  saveText: { color: colors.orange, fontSize: font.md, fontWeight: '500' },
-  content: { padding: spacing.lg, gap: spacing.xl },
-  label: { fontSize: font.sm, color: colors.textMuted, marginBottom: 6 },
-  value: { fontSize: font.base, color: colors.white },
-  input: {
-    backgroundColor: colors.bgCardDeep, borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.md,
-    color: colors.white, paddingHorizontal: spacing.md, paddingVertical: 10, fontSize: font.base,
+  group: { backgroundColor: colors.bgCard, borderRadius: radius.lg, overflow: 'hidden' },
+  groupFooter: { fontSize: font.base, color: colors.textMuted, lineHeight: 18, marginTop: spacing.sm, paddingHorizontal: spacing.lg },
+  inset: { marginLeft: spacing.lg },
+
+  accountRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.lg },
+  avatar: {
+    width: 44, height: 44, borderRadius: 22, backgroundColor: colors.orange,
+    alignItems: 'center', justifyContent: 'center',
   },
-  help: { fontSize: font.xs, color: colors.textDim, marginTop: 6, lineHeight: 16 },
-  secondaryBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.md, paddingVertical: 10,
-    backgroundColor: colors.bgCardDeep,
-  },
-  secondaryText: { color: colors.text, fontSize: font.base },
-  checkText: { fontSize: font.sm },
-  optionRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md },
-  optionText: { flex: 1, color: colors.white, fontSize: font.base },
-  optionMeta: { color: colors.textDim, fontSize: font.xs },
+  avatarText: { fontSize: 19, fontWeight: '700', color: colors.white },
+
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.lg, minHeight: 60 },
+  rowLabel: { fontSize: 17, color: colors.white },
+  rowSub: { fontSize: font.base, color: colors.textMuted, marginTop: 1 },
+  rowAction: { fontSize: font.md, color: colors.white, fontWeight: '600' },
+
+  field: { paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.xs },
+  fieldLabel: { fontSize: font.sm, color: colors.textMuted },
+  input: { fontSize: 17, color: colors.white, minHeight: 40, paddingVertical: spacing.xs },
+
+  optionRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.lg, minHeight: 56 },
+  actionRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.lg, minHeight: 50 },
+  actionText: { fontSize: 17 },
+
+  version: { fontSize: font.sm, color: colors.textDim, textAlign: 'center' },
 });

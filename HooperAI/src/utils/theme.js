@@ -17,7 +17,7 @@ export const colors = {
   yellow:     '#c8a900',
   yellowFade: 'rgba(232,210,38,0.12)',
 
-  red:        '#ff453a',   // recording only
+  red:        '#ff453a',   // recording and destructive actions only
 
   white:      '#ffffff',
   text:       '#cccccc',
