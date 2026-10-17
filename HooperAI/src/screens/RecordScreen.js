@@ -9,15 +9,13 @@ import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, radius, spacing, font } from '../utils/theme';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { saveSession, summarizeShots } from '../utils/storage';
+import { saveSession, summarizeShots, pendingJobKey } from '../utils/storage';
 import * as api from '../services/api';
 
 // Flow: idle → recording → ready (have a clip) → uploading → analyzing → done
 //                                  ↑ error ←───────────┘
 // The video is uploaded in original quality; only results come back.
 // Review happens on the Session screen, the same one Home opens.
-
-const PENDING_KEY = 'hooperai_pending_job';   // analysis still running on the laptop
 
 const fmtTime = (s) => (s == null ? '' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`);
 
@@ -107,7 +105,7 @@ export default function RecordScreen() {
   useEffect(() => {
     (async () => {
       try {
-        const raw = await AsyncStorage.getItem(PENDING_KEY);
+        const raw = await AsyncStorage.getItem(pendingJobKey());
         if (raw && stageRef.current === 'idle') {
           const p = JSON.parse(raw);
           setClip({ uri: p.localUri, durationS: null, source: 'resumed' });
@@ -175,7 +173,7 @@ export default function RecordScreen() {
       if (cancelled.current) return;
 
       const { job_id } = await api.analyze(name);
-      await AsyncStorage.setItem(PENDING_KEY, JSON.stringify({ jobId: job_id, name, localUri: clip.uri }));
+      await AsyncStorage.setItem(pendingJobKey(), JSON.stringify({ jobId: job_id, name, localUri: clip.uri }));
       await followJob(job_id, name, clip.uri);
     } catch (e) {
       if (e.message === 'cancelled') return;
@@ -197,7 +195,7 @@ export default function RecordScreen() {
         else if (st === 'queued') setStep('Waiting for the laptop to start');
         else if (st !== 'reconnecting') setStep(`${st[0].toUpperCase()}${st.slice(1)}`);
       }, () => cancelled.current);
-      await AsyncStorage.removeItem(PENDING_KEY);
+      await AsyncStorage.removeItem(pendingJobKey());
       await saveSession(jobId, res, { localUri });
       const sum = summarizeShots(res.shots || []);
       setDone({ id: jobId, total: sum.total, made: sum.made });
@@ -205,7 +203,7 @@ export default function RecordScreen() {
       setStage('done');
     } catch (e) {
       if (e.message === 'cancelled') return;   // unmounted – resumes next time
-      await AsyncStorage.removeItem(PENDING_KEY);
+      await AsyncStorage.removeItem(pendingJobKey());
       setReconnecting(false);
       setStage(localUri ? 'ready' : 'idle');
       setError(e.status === 404

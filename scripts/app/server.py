@@ -93,6 +93,67 @@ def _video_path(name: str) -> Path:
     return path
 
 
+# Who uploaded which video. Firebase users only see their own uploads; the
+# single-user modes (localhost, API key) also see videos copied in by hand.
+_OWNERS_LOCK = threading.Lock()
+
+
+def _owners_file() -> Path:
+    return SESSIONS_DIR.parent / "app_video_owners.json"   # outside the sessions glob
+
+
+def _video_owners() -> dict:
+    try:
+        return json.loads(_owners_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _set_video_owner(name: str, uid: str):
+    with _OWNERS_LOCK:
+        owners = _video_owners()
+        owners[name] = uid
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        _owners_file().write_text(json.dumps(owners), encoding="utf-8")
+
+
+def _can_use_video(name: str, user: User, owners: dict | None = None) -> bool:
+    owner = (owners if owners is not None else _video_owners()).get(name)
+    if user.mode == "local":
+        return True
+    if owner is not None:
+        return owner == user.uid
+    return user.mode != "firebase"   # unowned: only for the single-user modes
+
+
+def backfill_video_owners() -> int:
+    """Give videos uploaded before ownership was recorded the owner of their sessions."""
+    owners = _video_owners()
+    added = 0
+    for path in SESSIONS_DIR.glob("*.json") if SESSIONS_DIR.exists() else []:
+        if path.name == _owners_file().name:
+            continue
+        try:
+            s = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        uid, video = s.get('uid'), s.get('video')
+        if video and uid and uid not in ('local', 'api_key') and video not in owners:
+            owners[video] = uid
+            added += 1
+    if added:
+        with _OWNERS_LOCK:
+            _owners_file().write_text(json.dumps(owners), encoding="utf-8")
+    return added
+
+
+def _user_video_path(name: str, user: User) -> Path:
+    path = _video_path(name)
+    if not _can_use_video(path.name, user):
+        raise HTTPException(404, f"video not found: {name}")   # don't reveal other users' files
+    return path
+
+
 def _predictor_configs():
     """Every loadable predictor config in data/model, rim rule first."""
     out = []
@@ -255,8 +316,9 @@ def status(user: User = Depends(current_user)):
 @app.get("/api/videos")
 def videos(user: User = Depends(current_user)):
     out = []
+    owners = _video_owners()
     for p in sorted(RAW_VIDEO_DIR.iterdir()) if RAW_VIDEO_DIR.exists() else []:
-        if p.suffix.lower() in VIDEO_EXTS:
+        if p.suffix.lower() in VIDEO_EXTS and _can_use_video(p.name, user, owners):
             st = p.stat()
             out.append({'name': p.name, 'size_mb': round(st.st_size / 1e6, 1), 'mtime': st.st_mtime})
     out.sort(key=lambda v: -v['mtime'])
@@ -278,13 +340,14 @@ async def upload_video(file: UploadFile = File(...), user: User = Depends(curren
         while chunk := await file.read(8 << 20):
             f.write(chunk)
     tmp.replace(dest)   # never leave a half-written video under its final name
+    _set_video_owner(name, user.uid)
     return {'name': name, 'size_mb': round(dest.stat().st_size / 1e6, 1)}
 
 
 @app.get("/api/videos/{name}/stream")
 def stream_video(name: str, request: Request, user: User = Depends(current_user)):
     """Serve the video with HTTP range support so the browser can seek."""
-    path = _video_path(name)
+    path = _user_video_path(name, user)
     size = path.stat().st_size
     rng = request.headers.get('range')
     if not rng:
@@ -319,7 +382,7 @@ class AnalyzeRequest(BaseModel):
 
 @app.post("/api/analyze")
 def analyze(req: AnalyzeRequest, user: User = Depends(current_user)):
-    video = _video_path(req.video)
+    video = _user_video_path(req.video, user)
     if Path(req.config).name != req.config or not (MODEL_DIR / req.config).exists():
         raise HTTPException(404, f"predictor not found: {req.config}")
     job_id = uuid.uuid4().hex[:12]
@@ -342,6 +405,8 @@ def job_status(job_id: str, user: User = Depends(current_user)):
 def sessions(user: User = Depends(current_user)):
     out = []
     for path in SESSIONS_DIR.glob("*.json") if SESSIONS_DIR.exists() else []:
+        if path.name == _owners_file().name:
+            continue
         try:
             s = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -513,6 +578,8 @@ def manual_shot(ms: ManualShot, user: User = Depends(current_user)):
 
 @app.get("/api/stats")
 def stats(user: User = Depends(current_user)):
+    if user.mode == "firebase":   # the training-data totals cover every user's labels
+        raise HTTPException(403, "only available on the laptop")
     df = _load_feedback()
     if df.empty:
         return {'labeled_shots': 0, 'videos': 0}
@@ -535,6 +602,8 @@ if __name__ == "__main__":
     host = os.environ.get("HOOPER_HOST", "127.0.0.1")   # 0.0.0.0 to reach it from a phone
     port = int(os.environ.get("HOOPER_PORT", "8000"))
     AUTH.check_host(host)
+    if (n := backfill_video_owners()):
+        print(f"Recorded owners for {n} earlier uploads")
     print(f"HooperAI server → http://{host}:{port}   (auth: {AUTH.mode}, "
           f"firestore sync: {'on' if FIRESTORE.enabled else 'off'})")
     uvicorn.run(app, host=host, port=port)

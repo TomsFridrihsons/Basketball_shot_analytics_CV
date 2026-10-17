@@ -1,15 +1,29 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const SHOTS_KEY = 'hooperai_shots';
-const SESSION_KEY = 'hooperai_sessions';
+// Every account on this phone gets its own cache: keys end in the Firebase uid
+// ('local' when accounts are off). Set by RootNavigator before any screen loads.
+let owner = 'local';
+const LEGACY_KEYS = ['hooperai_shots', 'hooperai_sessions', 'hooperai_pending_job'];
+
+const scoped = (base) => `${base}_${owner}`;
+const shotsKey = () => scoped('hooperai_shots');
+const sessionsKey = () => scoped('hooperai_sessions');
+export const pendingJobKey = () => scoped('hooperai_pending_job');
+
+/** Switch the cache to this account. The old shared cache can't be told apart by
+ *  account, so it is dropped once – the laptop re-syncs each account's sessions. */
+export async function setStorageOwner(uid) {
+  owner = uid || 'local';
+  try { await AsyncStorage.multiRemove(LEGACY_KEYS); } catch (_) { /* nothing to drop */ }
+}
 export const NOT_A_SHOT = -1;   // label for detections that were not real shots
 
 export async function saveShot(shot) {
   try {
-    const raw = await AsyncStorage.getItem(SHOTS_KEY);
+    const raw = await AsyncStorage.getItem(shotsKey());
     const shots = raw ? JSON.parse(raw) : [];
     shots.unshift({ ...shot, id: Date.now(), timestamp: new Date().toISOString() });
-    await AsyncStorage.setItem(SHOTS_KEY, JSON.stringify(shots));
+    await AsyncStorage.setItem(shotsKey(), JSON.stringify(shots));
     return shots;
   } catch (e) {
     console.error('saveShot error', e);
@@ -19,7 +33,7 @@ export async function saveShot(shot) {
 
 export async function getShots() {
   try {
-    const raw = await AsyncStorage.getItem(SHOTS_KEY);
+    const raw = await AsyncStorage.getItem(shotsKey());
     return raw ? JSON.parse(raw) : [];
   } catch (e) {
     return [];
@@ -27,7 +41,7 @@ export async function getShots() {
 }
 
 export async function clearShots() {
-  await AsyncStorage.removeItem(SHOTS_KEY);
+  await AsyncStorage.removeItem(shotsKey());
 }
 
 // ── Analyzed sessions (from the laptop server) ──────────────────────────────
@@ -70,7 +84,7 @@ export async function saveSession(sessionId, result, extra = {}) {
       .map(s => toShot(sessionId, s, result.fps, timestamp)).reverse();
     const next = [...fresh, ...shots]
       .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    await AsyncStorage.setItem(SHOTS_KEY, JSON.stringify(next));
+    await AsyncStorage.setItem(shotsKey(), JSON.stringify(next));
 
     const sessions = all.filter(s => s.id !== sessionId);
     sessions.push({
@@ -81,7 +95,7 @@ export async function saveSession(sessionId, result, extra = {}) {
       timestamp,
     });
     sessions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-    await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(sessions.slice(0, 100)));
+    await AsyncStorage.setItem(sessionsKey(), JSON.stringify(sessions.slice(0, 100)));
     return next;
   } catch (e) {
     console.error('saveSession error', e);
@@ -91,7 +105,7 @@ export async function saveSession(sessionId, result, extra = {}) {
 
 export async function getSessions() {
   try {
-    const raw = await AsyncStorage.getItem(SESSION_KEY);
+    const raw = await AsyncStorage.getItem(sessionsKey());
     return raw ? JSON.parse(raw) : [];
   } catch (e) {
     return [];
