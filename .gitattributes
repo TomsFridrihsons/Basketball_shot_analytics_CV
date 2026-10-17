@@ -19,3 +19,6 @@
 *.jpeg binary
 *.gif binary
 *.zip binary
+# Git hooks run under sh: keep LF
+scripts/git-hooks/* text eol=lf
+*.sh text eol=lf

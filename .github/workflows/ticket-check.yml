@@ -1,0 +1,28 @@
+name: Ticket check
+
+# Pull requests must belong to an HPAI ticket (see docs/WORKFLOW.md).
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  ticket:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Branch name and title carry an HPAI ticket
+        env:
+          HEAD: ${{ github.head_ref }}
+          BASE: ${{ github.base_ref }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [ "$HEAD" = "development" ] && [ "$BASE" = "main" ]; then
+            echo "Release development → main: OK"; exit 0
+          fi
+          if ! printf '%s' "$HEAD" | grep -Eq '^(feature|bugfix|hotfix|chore)/HPAI-[0-9]+-[a-z0-9-]+$'; then
+            echo "::error::Branch '$HEAD' must be <feature|bugfix|hotfix|chore>/HPAI-<n>-<short-name>"; exit 1
+          fi
+          TICKET=$(printf '%s' "$HEAD" | sed -E 's#^[a-z]+/(HPAI-[0-9]+).*#\1#')
+          case "$TITLE" in
+            "$TICKET"*) echo "Ticket $TICKET: OK" ;;
+            *) echo "::error::PR title must start with $TICKET"; exit 1 ;;
+          esac

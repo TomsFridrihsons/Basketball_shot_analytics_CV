@@ -1,0 +1,16 @@
+#!/bin/sh
+# Prefill "HPAI-<n>: " from the branch name (<type>/HPAI-<n>-<name>) if the
+# subject line doesn't already start with a ticket. Skips merges, squashes and amends.
+MSG_FILE="$1"
+SOURCE="$2"
+
+case "$SOURCE" in merge|squash|commit) exit 0 ;; esac
+
+BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null) || exit 0
+TICKET=$(printf '%s' "$BRANCH" | sed -n 's#^[a-z]*/\(HPAI-[0-9][0-9]*\).*#\1#p')
+[ -z "$TICKET" ] && exit 0
+
+SUBJECT=$(grep -v '^#' "$MSG_FILE" | sed -n '/./{p;q;}')
+if ! printf '%s' "$SUBJECT" | grep -q '^HPAI-[0-9][0-9]*:'; then
+  { printf '%s: ' "$TICKET"; cat "$MSG_FILE"; } > "$MSG_FILE.tmp" && mv "$MSG_FILE.tmp" "$MSG_FILE"
+fi
