@@ -2,7 +2,7 @@
 // of truth for results and labels (labels may also come from the laptop's
 // browser test bench or another device). Runs when Home / Stats open.
 import * as api from './api';
-import { getSessions, saveSession, summarizeShots } from '../utils/storage';
+import { getSessions, saveSession, summarizeShots, keepOnlySessions } from '../utils/storage';
 
 let running = null;
 
@@ -15,6 +15,9 @@ export function syncSessions() {
     let changed = false;
     try {
       const remote = await api.sessions();
+      // The laptop lists exactly this account's sessions: anything else cached
+      // here (deleted on the laptop, or left from another account) goes.
+      if (await keepOnlySessions(remote.map(r => r.id))) changed = true;
       const local = new Map((await getSessions()).map(s => [s.id, s]));
       for (const r of remote) {
         const mine = local.get(r.id);
