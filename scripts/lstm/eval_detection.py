@@ -96,9 +96,12 @@ if __name__ == "__main__":
     ap.add_argument("--conf", type=float, default=infer.YOLO_CONF, help="basket / player threshold")
     ap.add_argument("--config", default=str(RIM_RULE_CONFIG), help="predictor config")
     ap.add_argument("--sweep", action="store_true", help="evaluate a grid of thresholds")
+    ap.add_argument("--trigger", choices=["new", "old"], default="new",
+                    help="new: hoop zone + aim check (HPAI-20); old: ball above the players")
     ap.add_argument("--tag", default="", help="name for the saved results file")
     args = ap.parse_args()
 
+    infer.NEW_TRIGGER = args.trigger == "new"
     cfg = Path(args.config)
     base = cfg.name.replace('_config.pkl', '')
     with contextlib.redirect_stdout(io.StringIO()):
@@ -106,7 +109,7 @@ if __name__ == "__main__":
             str(YOLO_MODEL), str(cfg.parent / f"{base}_best.keras"),
             str(cfg.parent / f"{base}_scaler.pkl"), str(cfg), str(PREDICTIONS_DIR))
 
-    print(f"Predictor: {cfg.name}")
+    print(f"Predictor: {cfg.name} | trigger: {args.trigger}")
     results = []
     if args.sweep:
         results.append(evaluate(predictor, 0.75, 0.75, "old behaviour"))
