@@ -57,12 +57,12 @@ set `HOOPER_TRUST_LOCALHOST=0` in `secrets/server.env`.)
 
 ## 3. Firebase accounts (still free)
 
-**Status (2026-10-17), project `hooperai-4f9cc`:** steps 1–5 are done: Email/Password
+**Status (2026-10-17), project `hooperai-4f9cc`:** steps 1–6 are done: Email/Password
 sign-in enabled, Firestore created in `eur3` (production mode) with `firestore.rules`
 published, web app "HooperAI mobile" registered and its config written to
-`HooperAI/.env` (git-ignored). **Remaining: step 6 (service-account key) and step 7.**
-Until step 6 the server stays in API-key mode; the app sends both its Firebase token and
-the API key from Settings, so keep the API key filled in.
+`HooperAI/.env`, service-account key saved as `secrets/firebase-adminsdk.json` and
+referenced from `secrets/server.env` (all git-ignored). **Remaining: step 7** (start the
+server and the app, create your account on the phone).
 
 1. [console.firebase.google.com](https://console.firebase.google.com) → **Add project**.
    Google Analytics is not needed. **Stay on the Spark (free) plan; do not upgrade.**
