@@ -17,6 +17,8 @@ Feature version 2 (FEATURE_COLS):
 import numpy as np
 import pandas as pd
 
+import ball_track
+
 # Raw per-frame columns written by shot_labeler.py and lstm_infer.py
 RAW_COLS = [
     'ball_x', 'ball_y', 'ball_w', 'ball_h',
@@ -27,7 +29,9 @@ RAW_COLS = [
     'ball_above_player',
 ]
 
-FEATURE_VERSION = 2
+# 2: original; 3: ball track cleaned + gaps filled with a parabola (ball_track.py, HPAI-19).
+# Saved models record the version they were trained with; inference passes it back.
+FEATURE_VERSION = 3
 FEATURE_COLS = [
     'ball_dx', 'ball_dy', 'ball_w', 'ball_h',
     'ball_vx', 'ball_vy',
@@ -50,20 +54,35 @@ RIM_FAR   = 3.0          # rim_offset outside the rim zone / clip value
 
 # Shot detection: frames the ball must stay above the players to confirm a shot.
 # Shared by shot_labeler.py and lstm_infer.py so both see the same shots.
+# Timings are in seconds so 30 and 60 fps videos behave the same (HPAI-19);
+# frames(seconds, fps) converts. The *_FRAMES names are the 30 fps equivalents.
+CONFIRM_S = 23 / 30          # ball above the players this long → confirmed shot
+POSSIBLE_TIMEOUT_S = 25 / 30  # possible shot dropped after this long without detections
 CONFIRM_FRAMES = 23
 # A confirmed shot ends when the ball has been missing this long (0.5 s at 30 fps):
 # after the rim it is often lost in the net or blurred and never seen coming down.
+SHOT_LOST_S = 0.5
 SHOT_LOST_FRAMES = 15
 
 
-def shot_to_features(raw) -> np.ndarray:
+def frames(seconds: float, fps: float) -> int:
+    """Seconds → whole frames at this video's frame rate (at least 1)."""
+    return max(1, int(round(seconds * (fps or 30.0))))
+
+
+def shot_to_features(raw, version: int = FEATURE_VERSION, fps: float = 30.0) -> np.ndarray:
     """(T, len(RAW_COLS)) raw frames → (T, len(FEATURE_COLS)) float32 features."""
     df = pd.DataFrame(np.asarray(raw, dtype=np.float64), columns=RAW_COLS)
 
     # A ball/player is "missing" when its box is NaN or was zero-filled
     ball_seen = df['ball_x'].notna() & (df['ball_x'] != 0)
     ball = df[['ball_x', 'ball_y', 'ball_w', 'ball_h']].where(ball_seen)
-    ball = ball.interpolate(limit=MAX_GAP, limit_area='inside')
+    if version >= 3:
+        keep = ball_track.clean_ball(ball)          # drop non-ball boxes and jumps
+        ball_seen = keep
+        ball = ball_track.fill_gaps(ball, keep, fps)  # parabola through short gaps
+    else:
+        ball = ball.interpolate(limit=MAX_GAP, limit_area='inside')
 
     player_seen = df['player_x'].notna() & (df['player_x'] != 0)
     player = df[['player_x', 'player_y', 'player_w', 'player_h']].where(player_seen).ffill().bfill()

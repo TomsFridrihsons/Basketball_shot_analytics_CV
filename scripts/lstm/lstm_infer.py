@@ -292,6 +292,7 @@ class RealTimeShotPredictor:
         # v2 models (lstm_train.py v6+) build features with shot_features.py;
         # older models take the raw pixel columns directly.
         self.feature_version   = self.config.get('feature_version', 1)
+        self.video_fps         = 30.0   # set per video in process_video
 
         # Rim-pass rule configs (lstm_train.py) need no network or scaler
         self.model_type = self.config.get('model_type', 'lstm')
@@ -485,16 +486,16 @@ class RealTimeShotPredictor:
         if not ball_boxes or not player_boxes:
             if self.actual_shot:
                 # The ball often vanishes after the rim (net, blur, out of frame):
-                # close the shot after SHOT_LOST_FRAMES instead of waiting forever.
+                # close the shot after SHOT_LOST_S instead of waiting forever.
                 self.shot_missing += 1
-                if self.shot_missing > sf.SHOT_LOST_FRAMES:
+                if self.shot_missing > sf.frames(sf.SHOT_LOST_S, self.video_fps):
                     self.actual_shot = False
                     self.trim_tail   = self.shot_missing   # drop the empty frames
                     ended            = True
                 return poss_started, conf_started, ended
             if self.possible_shot:
                 self.poss_frame_count += 1
-                if self.poss_frame_count > 25:
+                if self.poss_frame_count > sf.frames(sf.POSSIBLE_TIMEOUT_S, self.video_fps):
                     self.possible_shot    = False
                     self.poss_frame_count = 0
                     self.pre_data         = []
@@ -521,7 +522,7 @@ class RealTimeShotPredictor:
         if self.possible_shot and not self.actual_shot:
             self.poss_frame_count += 1
             if above:
-                if self.poss_frame_count >= sf.CONFIRM_FRAMES:
+                if self.poss_frame_count >= sf.frames(sf.CONFIRM_S, self.video_fps):
                     self.actual_shot   = True
                     self.possible_shot = False
                     self.shot_data     = self.pre_data[:]
@@ -645,7 +646,7 @@ class RealTimeShotPredictor:
             return None, None
 
         if self.model_type == 'rim_rule':
-            offset = sf.rim_pass_offset(sf.shot_to_features(np.array(self.shot_data, dtype=np.float64)))
+            offset = sf.rim_pass_offset(sf.shot_to_features(np.array(self.shot_data, dtype=np.float64), self.feature_version, self.video_fps))
             # Map the offset to a 0–1 score; 0.5 exactly at the threshold
             prob  = float(1.0 / (1.0 + np.exp((offset - self.rim_threshold) / 0.1)))
             label = 1 if prob >= self.optimal_threshold else 0
@@ -655,7 +656,7 @@ class RealTimeShotPredictor:
 
         if self.model_type == 'lstm_hybrid':
             # v7: [scaled frame sequence, scaled shot-geometry summary, rule logit]
-            feats  = sf.shot_to_features(np.array(self.shot_data, dtype=np.float64))
+            feats  = sf.shot_to_features(np.array(self.shot_data, dtype=np.float64), self.feature_version, self.video_fps)
             seq    = self.scaler['seq'].transform(feats).astype(np.float32)
             summ   = self.scaler['summary'].transform(sf.shot_summary(feats)[None]).astype(np.float32)
             rule   = np.clip((self.scaler['rim_threshold'] - sf.rim_pass_offset(feats))
@@ -670,7 +671,7 @@ class RealTimeShotPredictor:
 
         if self.feature_version >= 2:
             # Same transform as training: features → scale real frames → tail-pad
-            seq = sf.shot_to_features(np.array(self.shot_data, dtype=np.float64))
+            seq = sf.shot_to_features(np.array(self.shot_data, dtype=np.float64), self.feature_version, self.video_fps)
             if self.scaler is not None:
                 seq = self.scaler.transform(seq).astype(np.float32)
             padded = sf.pad_tail([seq], self.max_seq_len)
@@ -853,7 +854,8 @@ class RealTimeShotPredictor:
         if not cap.isOpened():
             raise ValueError(f"Cannot open video: {video_path}")
 
-        fps          = cap.get(cv2.CAP_PROP_FPS)
+        fps          = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        self.video_fps = fps
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fw           = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         fh           = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -968,7 +970,7 @@ class RealTimeShotPredictor:
             if self.possible_shot:
                 cv2.rectangle(annotated, (10, 10), (680, 58), (0, 165, 255), -1)
                 cv2.putText(annotated,
-                            f"POSSIBLE SHOT ({self.poss_frame_count}/{sf.CONFIRM_FRAMES})",
+                            f"POSSIBLE SHOT ({self.poss_frame_count}/{sf.frames(sf.CONFIRM_S, self.video_fps)})",
                             (18, 44), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,0), 2)
 
             elif self.actual_shot:
