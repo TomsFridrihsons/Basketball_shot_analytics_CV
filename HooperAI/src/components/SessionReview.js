@@ -73,8 +73,9 @@ function ShotRow({ shot, fps, active, playing, onPlay, onLabel }) {
 
 // ── review ───────────────────────────────────────────────────────────────────
 export default function SessionReview({ session, footer }) {
-  const fps = session.result.fps || 30;
-  const [shots, setShots] = useState(session.result.shots);
+  const result = session?.result ?? { shots: [], fps: 30 };   // never crash on a malformed session
+  const fps = result.fps || 30;
+  const [shots, setShots] = useState(result.shots || []);
   const [current, setCurrent] = useState(null);       // index of the selected shot
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);

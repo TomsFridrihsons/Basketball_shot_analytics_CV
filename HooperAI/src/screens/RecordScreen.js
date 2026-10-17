@@ -198,7 +198,7 @@ export default function RecordScreen() {
         </TouchableOpacity>
       </View>
 
-      {stage === 'results' && session ? (
+      {stage === 'results' && session?.result ? (
         <SessionReview
           session={session}
           footer={
