@@ -122,6 +122,14 @@ def test_api_key_required(env):
     assert c.get("/api/videos", headers={"Authorization": "Bearer secret"}).status_code == 200
 
 
+def test_api_key_mode_accepts_app_sending_firebase_token_too(env):
+    # The app sends its Firebase ID token and the API key; an API-key server uses the key
+    both = {"Authorization": "Bearer some-firebase-id-token", "X-API-Key": "secret"}
+    assert env['client'].get("/api/videos", headers=both).status_code == 200
+    wrong = {"Authorization": "Bearer some-firebase-id-token", "X-API-Key": "nope"}
+    assert env['client'].get("/api/videos", headers=wrong).status_code == 401
+
+
 def test_analyze_persists_session(env):
     c = env['client']
     job_id, job = _analyze(c)

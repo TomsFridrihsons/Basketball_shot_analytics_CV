@@ -81,16 +81,19 @@ export default function SettingsScreen() {
                 Same Wi-Fi: the laptop's IP. Away from home: its Tailscale address (free), e.g. http://100.x.y.z:8000.
               </Text>
             </View>
-            {!isFirebaseConfigured && (
-              <View>
-                <Text style={styles.label}>API key</Text>
-                <TextInput
-                  style={styles.input} value={apiKey} onChangeText={setApiKey}
-                  placeholder="value of HOOPER_API_KEY on the laptop" placeholderTextColor={colors.textGhost}
-                  autoCapitalize="none" autoCorrect={false} secureTextEntry
-                />
-              </View>
-            )}
+            <View>
+              <Text style={styles.label}>API key</Text>
+              <TextInput
+                style={styles.input} value={apiKey} onChangeText={setApiKey}
+                placeholder="value of HOOPER_API_KEY on the laptop" placeholderTextColor={colors.textGhost}
+                autoCapitalize="none" autoCorrect={false} secureTextEntry
+              />
+              {isFirebaseConfigured && (
+                <Text style={styles.help}>
+                  Only needed while the laptop server has no Firebase service account (auth: api_key).
+                </Text>
+              )}
+            </View>
             <TouchableOpacity style={styles.secondaryBtn} onPress={testConnection} disabled={testing}>
               {testing ? <ActivityIndicator color={colors.orange} size="small" />
                 : <Ionicons name="pulse-outline" size={16} color={colors.text} />}

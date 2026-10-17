@@ -55,7 +55,14 @@ Traffic goes directly between your devices and is encrypted; nothing is exposed 
 internet. (If you use a tunnel that forwards from localhost instead, such as cloudflared,
 set `HOOPER_TRUST_LOCALHOST=0` in `secrets/server.env`.)
 
-## 3. Firebase accounts (when you're ready, still free)
+## 3. Firebase accounts (still free)
+
+**Status (2026-10-17), project `hooperai-4f9cc`:** steps 1–5 are done: Email/Password
+sign-in enabled, Firestore created in `eur3` (production mode) with `firestore.rules`
+published, web app "HooperAI mobile" registered and its config written to
+`HooperAI/.env` (git-ignored). **Remaining: step 6 (service-account key) and step 7.**
+Until step 6 the server stays in API-key mode; the app sends both its Firebase token and
+the API key from Settings, so keep the API key filled in.
 
 1. [console.firebase.google.com](https://console.firebase.google.com) → **Add project**.
    Google Analytics is not needed. **Stay on the Spark (free) plan; do not upgrade.**
@@ -76,7 +83,8 @@ set `HOOPER_TRUST_LOCALHOST=0` in `secrets/server.env`.)
    FIREBASE_CREDENTIALS=C:\Users\fridr\Documents\HooperAI\secrets\firebase-adminsdk.json
    ```
 7. Restart the server (it prints `auth: firebase, firestore sync: on`) and
-   `npx expo start` (it reads `.env` at start). The app now opens with sign-in; create
+   `npx expo start --clear` (`--clear` is needed after editing `.env`; otherwise Metro
+   can serve a cached bundle without the new values). The app now opens with sign-in; create
    your account there. Each analyzed session is mirrored to
    `users/{your uid}/sessions/{id}` in Firestore.
 

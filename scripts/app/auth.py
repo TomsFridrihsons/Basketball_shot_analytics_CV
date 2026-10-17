@@ -71,8 +71,12 @@ class Auth:
 
         header = request.headers.get("authorization", "")
         bearer = header[7:].strip() if header.lower().startswith("bearer ") else None
+        api_key = request.headers.get("x-api-key")
         # <video src> cannot send headers, so the stream endpoint also accepts ?token=
-        supplied = bearer or request.headers.get("x-api-key") or request.query_params.get("token")
+        query = request.query_params.get("token")
+        # The app may send both a Firebase token and an API key (while the server
+        # has no service account yet); use the one this mode understands.
+        supplied = (api_key or bearer or query) if self.mode == "api_key" else (bearer or query)
         if not supplied:
             raise HTTPException(401, "missing credentials")
 

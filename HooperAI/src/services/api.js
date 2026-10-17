@@ -12,11 +12,15 @@ export class ApiError extends Error {
   }
 }
 
+// Sends both when available: a Firebase-mode server uses the ID token, an
+// API-key-mode server (no service account configured yet) uses the key.
 async function authHeaders() {
+  const headers = {};
   const token = await getIdToken();
-  if (token) return { Authorization: `Bearer ${token}` };
+  if (token) headers.Authorization = `Bearer ${token}`;
   const { apiKey } = await getSettings();
-  return apiKey ? { 'X-API-Key': apiKey } : {};
+  if (apiKey) headers['X-API-Key'] = apiKey;
+  return headers;
 }
 
 async function request(path, { method = 'GET', body, timeoutMs = 15000 } = {}) {
