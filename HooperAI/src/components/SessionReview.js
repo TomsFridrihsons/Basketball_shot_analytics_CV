@@ -43,6 +43,13 @@ function ShotRow({ shot, fps, active, playing, onPlay, onLabel }) {
           <Text style={styles.rowMeta}>
             {fmt(start)} – {fmt(end)} · {manual ? 'added by you' : CONF[shot.confidence] || 'model'}
           </Text>
+          {shot.metrics?.reliable && (
+            <Text style={styles.rowMetrics}>
+              arc {shot.metrics.arc_height_m} m
+              {shot.metrics.entry_angle_deg != null ? ` · entry ${shot.metrics.entry_angle_deg}°` : ''}
+              {` · release ${shot.metrics.release_angle_deg}° at ${shot.metrics.release_speed_ms} m/s`}
+            </Text>
+          )}
         </View>
         <View style={styles.predCol}>
           {manual ? (
@@ -361,6 +368,7 @@ const styles = StyleSheet.create({
   playBtnOn: { backgroundColor: colors.orange, borderColor: colors.orange },
   rowTitle: { color: colors.white, fontSize: font.base, fontWeight: '500' },
   rowMeta: { color: colors.textDim, fontSize: font.xs, marginTop: 2 },
+  rowMetrics: { color: colors.textMuted, fontSize: font.xs, marginTop: 2 },
   predCol: { alignItems: 'flex-end', gap: 3 },
   predLabel: { color: colors.textGhost, fontSize: 9, textTransform: 'uppercase', letterSpacing: 0.6 },
   chip: { borderRadius: radius.full, paddingHorizontal: spacing.sm, paddingVertical: 2, borderWidth: 0.5 },

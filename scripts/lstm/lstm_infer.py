@@ -42,6 +42,8 @@ from paths import (YOLO_MODEL as _YOLO, RAW_VIDEO_DIR, PREDICTIONS_DIR,  # noqa:
                    ANNOTATIONS_DIR, DETECTIONS_DIR, RIM_RULE_CONFIG, lstm_artifacts)
 import shot_features as sf  # noqa: E402
 import ball_track  # noqa: E402
+import shot_judge  # noqa: E402
+import shot_metrics  # noqa: E402
 
 _LSTM = lstm_artifacts("basketball_shot_lstm_v6")
 YOLO_MODEL  = str(_YOLO)
@@ -302,6 +304,9 @@ class RealTimeShotPredictor:
             self.lstm = self.scaler = None
             self.rim_threshold = self.config['rim_threshold']
             print(f"\n  ✅ Rim-pass rule (made if rim offset < {self.rim_threshold:.2f} basket widths)")
+        elif self.model_type == 'trajectory_judge':
+            self.lstm = self.scaler = None
+            print(f"\n  ✅ Trajectory judge {self.config['judge_params']}")
         else:
             # ─── 2. LOAD LSTM MODEL ───────────────────────────────────────────────
             print("Loading LSTM …")
@@ -757,6 +762,15 @@ class RealTimeShotPredictor:
             print(f"  Prediction : {'MADE' if label else 'MISSED'}")
             return label, prob
 
+        if self.model_type == 'trajectory_judge':
+            feats = sf.shot_to_features(np.array(self.shot_data, dtype=np.float64),
+                                        self.feature_version, self.video_fps)
+            sig = shot_judge.signals(feats, self.video_fps)
+            label, prob = shot_judge.decide(sig, self.config['judge_params'])
+            print(f"  Judge      : {sig}")
+            print(f"  Prediction : {'MADE' if label else 'MISSED'}")
+            return label, prob
+
         if self.model_type == 'lstm_hybrid':
             # v7: [scaled frame sequence, scaled shot-geometry summary, rule logit]
             feats  = sf.shot_to_features(np.array(self.shot_data, dtype=np.float64), self.feature_version, self.video_fps)
@@ -888,6 +902,14 @@ class RealTimeShotPredictor:
 
     # ── Video processing ──────────────────────────────────────────────────────
 
+    def _metrics(self):
+        """Release speed / angle, arc height, entry angle (HPAI-22); None if not measurable."""
+        try:
+            feats = sf.shot_to_features(np.array(self.shot_data, dtype=np.float64), 3, self.video_fps)
+            return shot_metrics.measure(feats, self.video_fps)
+        except Exception:
+            return None
+
     def _finish_shot(self, annotated, display: bool, video_path: str, verbose: bool):
         """Predict the collected shot, record it in stats, ask for feedback (display mode)."""
         end_frame = self.frame_idx
@@ -921,6 +943,7 @@ class RealTimeShotPredictor:
                 'start_frame':     self.shot_start_frame,
                 'end_frame':       end_frame,
                 'n_frames':        len(self.shot_data),
+                'metrics':         self._metrics(),
             })
             self.shot_frames[self.stats['total_shots']] = list(self.shot_data)
 
