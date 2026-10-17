@@ -6,9 +6,6 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "splash": {
-      "backgroundColor": "#0a0a0a"
-    },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -43,7 +40,15 @@
           "microphonePermission": false
         }
       ],
-      "expo-font"
+      "expo-font",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0a0a0a",
+          "image": "./assets/adaptive-icon.png",
+          "imageWidth": 160
+        }
+      ]
     ]
   }
 }

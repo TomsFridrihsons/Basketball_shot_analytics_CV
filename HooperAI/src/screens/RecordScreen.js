@@ -180,12 +180,8 @@ export default function RecordScreen() {
   };
 
   const pickVideo = async () => {
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Videos,
-      quality: 1,
-      // keep the original file (no re-encode on iOS)
-      videoExportPreset: ImagePicker.VideoExportPreset.Passthrough,
-    });
+    // Default videoExportPreset is Passthrough: the original file, no re-encode
+    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['videos'], quality: 1 });
     if (res.canceled || !res.assets?.length) return;
     const a = res.assets[0];
     setClip({ uri: a.uri, durationS: a.duration ? a.duration / 1000 : null, source: 'library',

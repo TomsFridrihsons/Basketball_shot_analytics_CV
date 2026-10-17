@@ -1,7 +1,8 @@
 // Client for the laptop server (scripts/app/server.py). Every call reads the
 // server URL from Settings and authenticates with a Firebase ID token when
 // signed in, otherwise with the API key from Settings (if any).
-import * as FileSystem from 'expo-file-system';
+// Upload with progress is part of the legacy API in SDK 54+ (still supported)
+import * as FileSystem from 'expo-file-system/legacy';
 import { getSettings } from './settings';
 import { getIdToken } from './auth';
 

@@ -1,6 +1,6 @@
 # HooperAI Mobile App
 
-React Native (Expo SDK 51) app for HooperAI. It records or picks a basketball video,
+React Native (Expo SDK 57) app for HooperAI. It records or picks a basketball video,
 sends it in original quality to the laptop server (`scripts/app/server.py`), and shows
 the detected shots with made/missed predictions. You label each shot; labels go back to
 the laptop as training data.
