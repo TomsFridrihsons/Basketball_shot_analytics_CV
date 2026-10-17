@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, ActivityIndicator, Alert,
+  Modal, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -57,6 +58,9 @@ export default function SettingsScreen() {
   const [predictor, setPredictor] = useState(null);
   const [conn, setConn] = useState({ state: 'checking' });   // checking | ok | error
   const [deleting, setDeleting] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);   // password confirmation sheet
+  const [password, setPassword] = useState('');
+  const [deleteError, setDeleteError] = useState('');
   const loaded = useRef(false);
   const user = currentUser();
 
@@ -101,20 +105,21 @@ export default function SettingsScreen() {
     { text: 'Sign Out', style: 'destructive', onPress: () => signOut() },
   ]);
 
-  const confirmDelete = () => Alert.alert(
-    'Delete your account?',
-    'This permanently deletes your HooperAI account. Videos and sessions on your laptop are not removed – delete them there if you want them gone. This can\'t be undone.',
-    [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete Account', style: 'destructive', onPress: async () => {
-          setDeleting(true);
-          try { await deleteAccount(); }   // RootNavigator returns to sign-in
-          catch (e) { Alert.alert('Account not deleted', authErrorMessage(e)); }
-          finally { setDeleting(false); }
-        },
-      },
-    ]);
+  // Deleting asks for the password in place: Firebase needs a recent sign-in, and
+  // making people sign out and back in first is a detour.
+  const openDelete = () => { setPassword(''); setDeleteError(''); setDeleteOpen(true); };
+  const closeDelete = () => { if (!deleting) setDeleteOpen(false); };
+  const runDelete = async () => {
+    if (!password || deleting) return;
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      await deleteAccount(password);   // RootNavigator returns to sign-in
+    } catch (e) {
+      setDeleteError(authErrorMessage(e));
+      setDeleting(false);
+    }
+  };
 
   const predictors = conn.status?.predictors || [];
   const selected = predictor || conn.status?.default_predictor;
@@ -205,7 +210,7 @@ export default function SettingsScreen() {
 
         {isFirebaseConfigured ? (
           <Group footer="Deleting your account removes your sign-in. Sessions on your laptop stay until you delete them there.">
-            <ActionRow label="Delete Account" icon="trash-outline" destructive busy={deleting} onPress={confirmDelete} />
+            <ActionRow label="Delete Account" icon="trash-outline" destructive onPress={openDelete} />
           </Group>
         ) : (
           <Group title="Account"
@@ -216,6 +221,44 @@ export default function SettingsScreen() {
 
         <Text style={styles.version}>HooperAI {Constants.expoConfig?.version || ''}</Text>
       </ScrollView>
+
+      {/* Delete Account: confirm with the password, then delete in one step */}
+      <Modal visible={deleteOpen} transparent animationType="fade" onRequestClose={closeDelete}>
+        <KeyboardAvoidingView style={styles.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={styles.sheet} accessibilityViewIsModal>
+            <Text style={styles.sheetTitle} accessibilityRole="header">Delete your account?</Text>
+            <Text style={styles.sheetBody}>
+              This permanently deletes {user?.email || 'your account'}. Videos and sessions on your laptop are not
+              removed – delete them there if you want them gone. This can't be undone.
+            </Text>
+            <Text style={styles.fieldLabel} nativeID="deletePasswordLabel">Enter your password to confirm</Text>
+            <TextInput style={styles.sheetInput} value={password} onChangeText={setPassword}
+              placeholder="Password" placeholderTextColor={colors.textGhost}
+              secureTextEntry autoFocus autoCapitalize="none" autoCorrect={false}
+              autoComplete="current-password" textContentType="password"
+              returnKeyType="done" onSubmitEditing={runDelete} editable={!deleting}
+              accessibilityLabelledBy="deletePasswordLabel" accessibilityLabel="Password" />
+            {!!deleteError && (
+              <View style={styles.sheetError} accessibilityLiveRegion="assertive" accessibilityRole="alert">
+                <Ionicons name="alert-circle" size={18} color={colors.red} />
+                <Text style={styles.sheetErrorText}>{deleteError}</Text>
+              </View>
+            )}
+            <View style={styles.sheetButtons}>
+              <TouchableOpacity style={styles.sheetBtn} onPress={closeDelete} disabled={deleting}
+                accessibilityRole="button">
+                <Text style={styles.sheetCancel}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.sheetBtn, styles.sheetDelete, (!password || deleting) && { opacity: 0.4 }]}
+                onPress={runDelete} disabled={!password || deleting}
+                accessibilityRole="button" accessibilityState={{ disabled: !password || deleting, busy: deleting }}>
+                {deleting ? <ActivityIndicator color={colors.white} />
+                  : <Text style={styles.sheetDeleteText}>Delete Account</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -256,4 +299,20 @@ const styles = StyleSheet.create({
   actionText: { fontSize: 17 },
 
   version: { fontSize: font.sm, color: colors.textDim, textAlign: 'center' },
+
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: spacing.xl },
+  sheet: { backgroundColor: colors.bgCard, borderRadius: radius.xl, padding: spacing.xl, gap: spacing.md },
+  sheetTitle: { fontSize: 20, fontWeight: '700', color: colors.white },
+  sheetBody: { fontSize: font.md, color: colors.textMuted, lineHeight: 21 },
+  sheetInput: {
+    backgroundColor: colors.bgCardDeep, borderRadius: radius.md, borderWidth: 0.5, borderColor: colors.border,
+    color: colors.white, paddingHorizontal: spacing.md, minHeight: 50, fontSize: 17, marginTop: -spacing.xs,
+  },
+  sheetError: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.sm },
+  sheetErrorText: { flex: 1, fontSize: font.base, color: colors.text, lineHeight: 19 },
+  sheetButtons: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
+  sheetBtn: { flex: 1, minHeight: 48, borderRadius: radius.lg, alignItems: 'center', justifyContent: 'center' },
+  sheetCancel: { fontSize: 17, fontWeight: '500', color: colors.text },
+  sheetDelete: { backgroundColor: colors.red },
+  sheetDeleteText: { fontSize: 17, fontWeight: '700', color: colors.white },
 });
