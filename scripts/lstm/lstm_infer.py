@@ -50,12 +50,31 @@ CONFIG_PATH = str(RIM_RULE_CONFIG)   # default predictor; use _LSTM["config"] fo
 VIDEO_PATH  = str(RAW_VIDEO_DIR / "20250711_171647.mp4")
 OUTPUT_DIR  = str(PREDICTIONS_DIR)
 
-YOLO_CONF        = 0.75   # YOLO detection confidence threshold
+YOLO_CONF        = 0.75   # threshold for basket and player boxes (server: yolo_conf)
+BALL_CONF        = 0.35   # the ball is small and blurred: it scores lower (HPAI-18)
+CACHE_CONF       = 0.25   # YOLO runs at this level; per-class thresholds apply when reading
 DISPLAY          = True   # show OpenCV window
 SAVE_VIDEO       = True   # write annotated video to output folder
 FEEDBACK_CSV     = str(ANNOTATIONS_DIR / "feedback_labels.csv")
 USE_DET_CACHE    = True   # reuse cached YOLO boxes on headless runs (display/save off)
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def class_thresholds() -> dict:
+    """Minimum confidence per YOLO class (ball, basket, player)."""
+    return {RealTimeShotPredictor.CLS_BALL: BALL_CONF,
+            RealTimeShotPredictor.CLS_BASKET: YOLO_CONF,
+            RealTimeShotPredictor.CLS_PLAYER: YOLO_CONF}
+
+
+def filter_by_class_conf(rows: np.ndarray) -> np.ndarray:
+    """Keep boxes [frame, cls, x1, y1, x2, y2, conf] above their class threshold.
+    Rows without a confidence column (old caches, saved at 0.75) are kept as is."""
+    if rows.shape[1] < 7 or len(rows) == 0:
+        return rows
+    th = class_thresholds()
+    need = np.array([th.get(int(c), 1.0) for c in rows[:, 1]])
+    return rows[rows[:, 6] >= need]
 
 
 # ── Custom serialisable layers (must match lstm_train.py) ────────────────────
@@ -702,7 +721,7 @@ class RealTimeShotPredictor:
         """Cache key: video name + size, YOLO weights, confidence threshold."""
         video = Path(video_path)
         size  = video.stat().st_size if video.exists() else 0
-        name  = f"{video.stem}_{size}_{Path(self.yolo_path).stem}_conf{YOLO_CONF:.2f}.npz"
+        name  = f"{video.stem}_{size}_{Path(self.yolo_path).stem}_c{int(CACHE_CONF * 100):02d}.npz"
         return DETECTIONS_DIR / name
 
     def _save_outputs(self, out_folder: str, video_path: str):
@@ -871,7 +890,7 @@ class RealTimeShotPredictor:
         cache_path = self._det_cache_path(video_path)
         cached     = None
         if headless and USE_DET_CACHE and cache_path.exists():
-            cached = np.load(cache_path)['boxes']   # rows: frame, cls, x1, y1, x2, y2
+            cached = np.load(cache_path)['boxes']   # rows: frame, cls, x1, y1, x2, y2, conf
             n_cached = int(cached[:, 0].max()) if len(cached) else total_frames
             total_frames = max(total_frames, n_cached)
             # frame_rows[k-1] = boxes of frame k (cache rows are sorted by frame)
@@ -901,15 +920,19 @@ class RealTimeShotPredictor:
 
             # YOLO detection (boxes come sorted by confidence)
             if cached is None:
-                results  = self.yolo(frame, conf=YOLO_CONF, verbose=False,
+                results  = self.yolo(frame, conf=CACHE_CONF, verbose=False,
                                      device=self.device, half=self.half)[0]
-                cls_arr  = results.boxes.cls.cpu().numpy()
-                xyxy_arr = results.boxes.xyxy.cpu().numpy()
-                new_cache.append(np.column_stack(
-                    [np.full(len(cls_arr), self.frame_idx), cls_arr, xyxy_arr]))
+                rows = np.column_stack([
+                    np.full(len(results.boxes), self.frame_idx),
+                    results.boxes.cls.cpu().numpy(),
+                    results.boxes.xyxy.cpu().numpy(),
+                    results.boxes.conf.cpu().numpy(),
+                ])
+                new_cache.append(rows)
             else:
                 rows = frame_rows[self.frame_idx - 1]
-                cls_arr, xyxy_arr = rows[:, 1], rows[:, 2:6]
+            rows = filter_by_class_conf(rows)
+            cls_arr, xyxy_arr = rows[:, 1], rows[:, 2:6]
 
             ball_boxes   = list(xyxy_arr[cls_arr == self.CLS_BALL])
             basket_boxes = list(xyxy_arr[cls_arr == self.CLS_BASKET])
@@ -997,7 +1020,7 @@ class RealTimeShotPredictor:
         # Cache detections only after a complete pass (not after pressing q)
         if new_cache is not None and reached_end and USE_DET_CACHE:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            boxes = np.concatenate(new_cache) if new_cache else np.zeros((0, 6))
+            boxes = np.concatenate(new_cache) if new_cache else np.zeros((0, 7))
             np.savez_compressed(cache_path, boxes=boxes.astype(np.float32))
             print(f"  Detections cached → {cache_path}")
 

@@ -360,7 +360,7 @@ def detections(job_id: str, user: User = Depends(current_user)):
     job = _job(job_id, user)
     if job.get('status') != 'done' or not Path(job.get('cache_path') or '').exists():
         raise HTTPException(409, "detections not ready")
-    boxes = np.load(job['cache_path'])['boxes']
+    boxes = infer.filter_by_class_conf(np.load(job['cache_path'])['boxes'])[:, :6]
     return {'boxes': np.round(boxes).astype(int).tolist(),
             'classes': {infer.RealTimeShotPredictor.CLS_BALL: 'ball',
                         infer.RealTimeShotPredictor.CLS_BASKET: 'basket',
