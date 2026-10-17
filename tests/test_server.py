@@ -84,6 +84,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "MODEL_DIR", models)
     monkeypatch.setattr(server, "SESSIONS_DIR", tmp_path / "sessions")
     monkeypatch.setattr(server, "FEEDBACK_CSV", tmp_path / "app_labeled.csv")
+    monkeypatch.setattr(server, "NOT_SHOTS_CSV", tmp_path / "app_not_shots.csv")
     monkeypatch.setattr(server, "_get_predictor", lambda config, conf: FakePredictor(cache))
     fs = FakeFirestore()
     monkeypatch.setattr(server, "FIRESTORE", fs)
@@ -165,6 +166,49 @@ def test_feedback_writes_training_rows_and_relabels(env):
     server.JOBS.clear()
     assert c.get(f"/api/jobs/{job_id}", headers=KEY).json()["result"]["shots"][0]["label"] == 0
     assert c.post("/api/feedback", json={"job_id": job_id, "shot_number": 1, "label": 5},
+                  headers=KEY).status_code == 400
+
+
+def test_not_a_shot_moves_rows_out_of_training_data(env):
+    c = env['client']
+    job_id, _ = _analyze(c)
+    c.post("/api/feedback", json={"job_id": job_id, "shot_number": 1, "label": 1}, headers=KEY)
+    r = c.post("/api/feedback", json={"job_id": job_id, "shot_number": 1, "label": -1}, headers=KEY)
+    assert r.status_code == 200, r.text
+    # removed from the made/missed file, stored as a false detection instead
+    labeled = pd.read_csv(env['tmp'] / "app_labeled.csv")
+    assert labeled.empty or 1 not in labeled['shot_result'].tolist()
+    not_shots = pd.read_csv(env['tmp'] / "app_not_shots.csv")
+    assert not_shots['shot_result'].unique().tolist() == [-1]
+    # excluded from totals, but counted as reviewed
+    assert r.json()['summary'] == {'total': 1, 'made': 0, 'labeled': 1}
+    s = [x for x in c.get("/api/sessions", headers=KEY).json() if x['id'] == job_id][0]
+    assert (s['total'], s['labeled']) == (1, 1)
+    # changing your mind moves it back
+    c.post("/api/feedback", json={"job_id": job_id, "shot_number": 1, "label": 0}, headers=KEY)
+    assert pd.read_csv(env['tmp'] / "app_not_shots.csv").empty
+    assert pd.read_csv(env['tmp'] / "app_labeled.csv")['shot_result'].tolist()[0] == 0
+
+
+def test_manual_shot_added_with_frames_from_cache(env):
+    c = env['client']
+    job_id, _ = _analyze(c)
+    r = c.post("/api/manual_shot", json={"job_id": job_id, "time_s": 4.0, "label": 1}, headers=KEY)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    shot = body['shot']
+    assert shot['manual'] and shot['prediction'] is None and shot['label'] == 1
+    # 2.0 s before and 0.7 s after the marked moment (frame 121 at 30 fps)
+    assert (shot['start_frame'], shot['end_frame']) == (61, 142)
+    assert [s['shot_number'] for s in body['result']['shots']] == [1, 3, 2]   # sorted by time
+    assert body['summary'] == {'total': 3, 'made': 2, 'labeled': 1}
+    rows = pd.read_csv(env['tmp'] / "app_labeled.csv")
+    assert len(rows) == 142 - 61 + 1 and rows['model_pred'].unique().tolist() == [-1]
+    # survives a restart and can be relabeled like any shot
+    server.JOBS.clear()
+    assert c.post("/api/feedback", json={"job_id": job_id, "shot_number": 3, "label": 0},
+                  headers=KEY).status_code == 200
+    assert c.post("/api/manual_shot", json={"job_id": job_id, "time_s": 1.0, "label": 2},
                   headers=KEY).status_code == 400
 
 

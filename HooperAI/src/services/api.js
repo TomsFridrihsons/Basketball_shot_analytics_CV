@@ -60,6 +60,9 @@ export const health = () => request('/api/health', { timeoutMs: 5000 });
 export const status = () => request('/api/status');
 export const sessions = () => request('/api/sessions');
 export const job = (jobId) => request(`/api/jobs/${jobId}`);
+export const manualShot = (jobId, timeS, label) =>
+  request('/api/manual_shot', { method: 'POST', body: { job_id: jobId, time_s: timeS, label } });
+/** label: 1 made, 0 missed, -1 not a shot */
 export const feedback = (jobId, shotNumber, label) =>
   request('/api/feedback', { method: 'POST', body: { job_id: jobId, shot_number: shotNumber, label } });
 

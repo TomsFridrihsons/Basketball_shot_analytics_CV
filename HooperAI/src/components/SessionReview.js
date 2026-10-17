@@ -5,10 +5,11 @@ import { useEventListener } from 'expo';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, radius, spacing, font } from '../utils/theme';
-import { labelShot } from '../utils/storage';
+import { labelShot, saveSession, summarizeShots, NOT_A_SHOT } from '../utils/storage';
 import * as api from '../services/api';
 
-// Review an analyzed session: watch each shot and label it made / missed.
+// Review an analyzed session: watch each shot and label it made / missed /
+// not a shot, and add shots the detector missed.
 // Plays the original clip from this phone when it is still there, otherwise
 // streams it back from the laptop.
 
@@ -24,11 +25,13 @@ function shotTimes(shot, fps) {
 
 // ── one shot ─────────────────────────────────────────────────────────────────
 function ShotRow({ shot, fps, active, playing, onPlay, onLabel }) {
+  const manual = shot.prediction == null;
   const made = shot.prediction === 1;
+  const notShot = shot.label === NOT_A_SHOT;
   const { start, end } = shotTimes(shot, fps);
-  const verdict = shot.label == null ? null : shot.label === shot.prediction;
+  const verdict = manual || shot.label == null || notShot ? null : shot.label === shot.prediction;
   return (
-    <View style={[styles.row, active && styles.rowActive]}>
+    <View style={[styles.row, active && styles.rowActive, notShot && styles.rowNotShot]}>
       <TouchableOpacity style={styles.rowTop} onPress={onPlay} activeOpacity={0.7}
         accessibilityLabel={`Play shot ${shot.shot_number}`}>
         <View style={[styles.playBtn, active && playing && styles.playBtnOn]}>
@@ -36,16 +39,26 @@ function ShotRow({ shot, fps, active, playing, onPlay, onLabel }) {
             color={active && playing ? colors.white : colors.text} />
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={styles.rowTitle}>Shot {shot.shot_number}</Text>
-          <Text style={styles.rowMeta}>{fmt(start)} – {fmt(end)} · {CONF[shot.confidence] || 'model'}</Text>
+          <Text style={[styles.rowTitle, notShot && styles.struck]}>Shot {shot.shot_number}</Text>
+          <Text style={styles.rowMeta}>
+            {fmt(start)} – {fmt(end)} · {manual ? 'added by you' : CONF[shot.confidence] || 'model'}
+          </Text>
         </View>
         <View style={styles.predCol}>
-          <Text style={styles.predLabel}>model says</Text>
-          <View style={[styles.chip, made ? styles.chipMade : styles.chipMissed]}>
-            <Text style={[styles.chipText, { color: made ? colors.green : colors.orange }]}>
-              {made ? 'MADE' : 'MISSED'}
-            </Text>
-          </View>
+          {manual ? (
+            <View style={[styles.chip, styles.chipManual]}>
+              <Text style={[styles.chipText, { color: colors.textMuted }]}>ADDED BY YOU</Text>
+            </View>
+          ) : (
+            <>
+              <Text style={styles.predLabel}>model says</Text>
+              <View style={[styles.chip, made ? styles.chipMade : styles.chipMissed]}>
+                <Text style={[styles.chipText, { color: made ? colors.green : colors.orange }]}>
+                  {made ? 'MADE' : 'MISSED'}
+                </Text>
+              </View>
+            </>
+          )}
         </View>
       </TouchableOpacity>
 
@@ -61,13 +74,62 @@ function ShotRow({ shot, fps, active, playing, onPlay, onLabel }) {
           <Ionicons name="close" size={15} color={shot.label === 0 ? colors.orange : colors.textMuted} />
           <Text style={[styles.labelText, shot.label === 0 && { color: colors.orange }]}>Missed</Text>
         </TouchableOpacity>
+        {!manual && (
+          <TouchableOpacity style={[styles.labelBtn, styles.notShotBtn, notShot && styles.notShotOn]}
+            onPress={() => onLabel(NOT_A_SHOT)} activeOpacity={0.8}
+            accessibilityLabel="Not a real shot">
+            <Ionicons name="ban-outline" size={14} color={notShot ? colors.white : colors.textMuted} />
+            <Text style={[styles.labelText, notShot && { color: colors.white }]}>Not a shot</Text>
+          </TouchableOpacity>
+        )}
       </View>
+      {notShot && (
+        <Text style={[styles.verdict, { color: colors.textDim }]}>
+          Not counted in your stats – this teaches the detector what isn't a shot.
+        </Text>
+      )}
       {verdict != null && (
         <Text style={[styles.verdict, { color: verdict ? colors.green : colors.yellow }]}>
           {verdict ? '✓ Model was right' : '✗ Model was wrong – thanks, this helps the most'}
         </Text>
       )}
     </View>
+  );
+}
+
+// ── add a shot the detector missed ───────────────────────────────────────────
+function AddShotBar({ time, disabled, busy, onAdd }) {
+  const [choosing, setChoosing] = useState(false);
+  if (choosing) {
+    return (
+      <View style={styles.addBar}>
+        <Text style={styles.addText}>Shot at {fmt(time)} was…</Text>
+        <TouchableOpacity style={[styles.addChoice, styles.labelMadeOn]} disabled={busy}
+          onPress={async () => { await onAdd(1); setChoosing(false); }}>
+          <Text style={[styles.labelText, { color: colors.green }]}>Made</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.addChoice, styles.labelMissOn]} disabled={busy}
+          onPress={async () => { await onAdd(0); setChoosing(false); }}>
+          <Text style={[styles.labelText, { color: colors.orange }]}>Missed</Text>
+        </TouchableOpacity>
+        {busy ? <ActivityIndicator size="small" color={colors.orange} />
+          : (
+            <TouchableOpacity onPress={() => setChoosing(false)} accessibilityLabel="Cancel adding a shot">
+              <Ionicons name="close" size={20} color={colors.textDim} />
+            </TouchableOpacity>
+          )}
+      </View>
+    );
+  }
+  return (
+    <TouchableOpacity style={[styles.addBar, disabled && { opacity: 0.4 }]} disabled={disabled}
+      onPress={() => setChoosing(true)} activeOpacity={0.8}>
+      <Ionicons name="add-circle-outline" size={20} color={colors.orange} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.addTitle}>Add a missed shot at {fmt(time)}</Text>
+        <Text style={styles.addText}>Pause where the ball reaches the hoop, then tap here.</Text>
+      </View>
+    </TouchableOpacity>
   );
 }
 
@@ -80,6 +142,7 @@ export default function SessionReview({ session, footer }) {
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [videoState, setVideoState] = useState('loading');   // loading | ready | missing
+  const [adding, setAdding] = useState(false);
   const stopAt = useRef(null);
   const listRef = useRef(null);
 
@@ -155,13 +218,30 @@ export default function SessionReview({ session, footer }) {
     if (after >= 0) setTimeout(() => playShot(after), 350);
   };
 
+  /** Add a shot the detector missed at the current video position. */
+  const addShot = async (label) => {
+    const at = player.currentTime;
+    player.pause();
+    setAdding(true);
+    try {
+      const res = await api.manualShot(session.id, at, label);
+      setShots(res.result.shots);
+      await saveSession(session.id, res.result, { localUri: session.localUri });
+      const idx = res.result.shots.findIndex((s) => s.shot_number === res.shot.shot_number);
+      if (idx >= 0) setTimeout(() => listRef.current?.scrollToIndex({ index: idx, viewPosition: 0.1 }), 200);
+    } catch (e) {
+      Alert.alert('Shot not added', e.message);
+    } finally {
+      setAdding(false);
+    }
+  };
+
   const active = useMemo(() => shots.findIndex((s) => {
     const { start, end } = shotTimes(s, fps);
     return time >= start - 0.05 && time <= end + POST_ROLL;
   }), [time, shots, fps]);
 
-  const made = shots.filter((s) => (s.label ?? s.prediction) === 1).length;
-  const labeled = shots.filter((s) => s.label != null).length;
+  const { total, made, labeled } = summarizeShots(shots);
   const activeShot = active >= 0 ? shots[active] : null;
 
   return (
@@ -190,12 +270,14 @@ export default function SessionReview({ session, footer }) {
 
       {/* Summary */}
       <View style={styles.summary}>
-        <Stat value={shots.length} label="shots" />
+        <Stat value={total} label="shots" />
         <Stat value={made} label="made" color={colors.green} />
-        <Stat value={shots.length ? `${Math.round((made / shots.length) * 100)}%` : '—'} label="FG%"
-          color={shots.length ? (made / shots.length >= 0.5 ? colors.green : colors.orange) : undefined} />
-        <Stat value={`${labeled}/${shots.length}`} label="labeled" />
+        <Stat value={total ? `${Math.round((made / total) * 100)}%` : '—'} label="FG%"
+          color={total ? (made / total >= 0.5 ? colors.green : colors.orange) : undefined} />
+        <Stat value={`${labeled}/${shots.length}`} label="reviewed" />
       </View>
+
+      <AddShotBar time={time} disabled={videoState !== 'ready'} busy={adding} onAdd={addShot} />
 
       <FlatList
         ref={listRef}
@@ -206,14 +288,15 @@ export default function SessionReview({ session, footer }) {
         ListHeaderComponent={shots.length > 0 ? (
           <Text style={styles.hint}>
             {labeled === shots.length
-              ? 'All shots labeled – these labels train the next model.'
-              : 'Tap a shot to watch it, then tell us if it went in.'}
+              ? 'All shots reviewed – these labels train the next model.'
+              : 'Tap a shot to watch it, then tell us if it went in (or wasn\'t a shot).'}
           </Text>
         ) : null}
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={styles.emptyText}>No shots were detected in this clip.</Text>
-            <Text style={styles.emptyHint}>Keep the hoop and the ball's flight in frame.</Text>
+            <Text style={styles.emptyHint}>Missed one? Play the video, pause where the ball
+              reaches the hoop and use "Add a missed shot" above.</Text>
           </View>
         }
         renderItem={({ item, index }) => (
@@ -268,6 +351,8 @@ const styles = StyleSheet.create({
     borderWidth: 0.5, borderColor: colors.border, gap: spacing.md,
   },
   rowActive: { borderColor: 'rgba(255,255,255,0.5)' },
+  rowNotShot: { opacity: 0.6 },
+  struck: { textDecorationLine: 'line-through', color: colors.textMuted },
   rowTop: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   playBtn: {
     width: 32, height: 32, borderRadius: 16, backgroundColor: colors.bgCardDeep,
@@ -282,6 +367,7 @@ const styles = StyleSheet.create({
   chipMade: { backgroundColor: colors.greenFade, borderColor: colors.greenBorder },
   chipMissed: { backgroundColor: colors.orangeFade, borderColor: colors.orangeBorder },
   chipText: { fontSize: font.xs, fontWeight: '700', letterSpacing: 0.5 },
+  chipManual: { backgroundColor: colors.bgCardDeep, borderColor: colors.border },
 
   labelRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   youSay: { color: colors.textDim, fontSize: font.sm, width: 32 },
@@ -293,5 +379,18 @@ const styles = StyleSheet.create({
   labelMadeOn: { borderColor: colors.greenBorder, backgroundColor: colors.greenFade },
   labelMissOn: { borderColor: colors.orangeBorder, backgroundColor: colors.orangeFade },
   labelText: { color: colors.textMuted, fontSize: font.sm },
+  notShotBtn: { flex: 1.1 },
+  notShotOn: { backgroundColor: '#2a2a2a', borderColor: '#555' },
+  addBar: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    marginHorizontal: spacing.lg, marginTop: spacing.md, padding: spacing.md,
+    borderRadius: radius.md, borderWidth: 0.5, borderColor: colors.orangeBorder,
+    backgroundColor: colors.orangeFade,
+  },
+  addTitle: { color: colors.white, fontSize: font.base, fontWeight: '500' },
+  addText: { color: colors.textMuted, fontSize: font.xs },
+  addChoice: {
+    flex: 1, alignItems: 'center', paddingVertical: 8, borderRadius: radius.md, borderWidth: 0.5,
+  },
   verdict: { fontSize: font.xs, marginTop: -4 },
 });

@@ -65,7 +65,11 @@ from auth import Auth, User  # noqa: E402
 from firestore_sync import FirestoreSync  # noqa: E402
 
 STATIC_DIR   = Path(__file__).resolve().parent / "static"
-FEEDBACK_CSV = ANNOTATIONS_DIR / "app_labeled.csv"
+FEEDBACK_CSV = ANNOTATIONS_DIR / "app_labeled.csv"      # real shots, made/missed (training data)
+NOT_SHOTS_CSV = ANNOTATIONS_DIR / "app_not_shots.csv"  # detections you marked "not a shot"
+NOT_A_SHOT = -1
+MANUAL_BEFORE_S = 2.0   # a shot you add covers this long before the moment you mark
+MANUAL_AFTER_S = 0.7    # ...and this long after it
 SESSIONS_DIR = DATA_DIR / "processed" / "app_sessions"
 VIDEO_EXTS   = {".mp4", ".mov", ".avi", ".mkv", ".3gp", ".m4v"}
 API_VERSION  = 2
@@ -344,13 +348,8 @@ def sessions(user: User = Depends(current_user)):
             continue
         if user.mode != "local" and s.get('uid') != user.uid:
             continue
-        shots = s.get('result', {}).get('shots', [])
-        out.append({
-            'id': s['id'], 'video': s['video'], 'config': s['config'], 'created': s['created'],
-            'total': len(shots),
-            'made': sum(1 for x in shots if (x['label'] if x.get('label') is not None else x['prediction']) == 1),
-            'labeled': sum(1 for x in shots if x.get('label') is not None),
-        })
+        out.append({'id': s['id'], 'video': s['video'], 'config': s['config'], 'created': s['created'],
+                    **_summary(s.get('result', {}).get('shots', []))})
     out.sort(key=lambda s: s['created'], reverse=True)
     return out
 
@@ -368,53 +367,148 @@ def detections(job_id: str, user: User = Depends(current_user)):
                         infer.RealTimeShotPredictor.CLS_PLAYER: 'player'}}
 
 
+def _summary(shots: list) -> dict:
+    """Counts the app shows. Detections marked "not a shot" are excluded from
+    total/made but count as reviewed. (Mirrors HooperAI/src/services/sync.js.)"""
+    real = [x for x in shots if x.get('label') != NOT_A_SHOT]
+    return {
+        'total':   len(real),
+        'made':    sum(1 for x in real if (x['label'] if x.get('label') is not None else x.get('prediction')) == 1),
+        'labeled': sum(1 for x in shots if x.get('label') is not None),
+    }
+
+
+def _replace_rows(csv_path: Path, df: pd.DataFrame | None, video: str, start: int, end: int) -> int:
+    """Drop rows of the same shot (same video, overlapping frames) from csv_path,
+    then append df (if given). Returns the number of shots in the file."""
+    old = pd.read_csv(csv_path) if csv_path.exists() else pd.DataFrame()
+    if not old.empty:
+        same = (old['source_video'] == video) & old['frame_count'].between(start, end)
+        old = old[~old['shot_number'].isin(old.loc[same, 'shot_number'].unique())]
+    if df is not None:
+        df = df.copy()
+        df['shot_number'] = int(old['shot_number'].max()) + 1 if not old.empty else 1
+        out = pd.concat([old, df], ignore_index=True) if not old.empty else df
+    else:
+        out = old
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    if not out.empty or csv_path.exists():
+        out.to_csv(csv_path, index=False)
+    return int(out['shot_number'].nunique()) if not out.empty else 0
+
+
+def _write_label(job: dict, shot: dict, frames: list, label: int) -> int:
+    """Store one labeled shot in labeler-CSV format: made/missed rows go to
+    app_labeled.csv, "not a shot" rows to app_not_shots.csv; an earlier label of
+    the same shot is replaced in both files."""
+    df = pd.DataFrame(frames, columns=sf.RAW_COLS)
+    start = int(shot['start_frame'])
+    end = start + len(df) - 1
+    df['frame_count'] = start + np.arange(len(df))
+    df['frame_within_shot'] = np.arange(len(df))
+    df['shot_result'] = int(label)
+    df['model_pred'] = shot.get('prediction') if shot.get('prediction') is not None else -1   # -1: added by you
+    df['model_prob'] = shot.get('probability')
+    df['predictor'] = job['config']
+    df['source_video'] = job['video']
+
+    real = label in (0, 1)
+    labeled = _replace_rows(FEEDBACK_CSV, df if real else None, job['video'], start, end)
+    _replace_rows(NOT_SHOTS_CSV, None if real else df, job['video'], start, end)
+
+    shot['label'] = int(label)
+    _save_session(job)
+    try:
+        FIRESTORE.update_label(job['uid'], job)
+    except Exception:
+        traceback.print_exc()
+    return labeled
+
+
+def _frames_from_cache(cache_path: str, start: int, end: int, fps: float) -> list:
+    """Rebuild a shot's raw frames from the cached YOLO boxes – used for shots the
+    detector missed, so they become training data too."""
+    boxes = np.load(cache_path)['boxes']
+    P = infer.RealTimeShotPredictor
+    ext = object.__new__(P)            # only the feature extractor's state is needed
+    ext.shot_data, ext.pre_data = [], []
+    ext._last_basket = None
+    prior = boxes[(boxes[:, 0] < start) & (boxes[:, 1] == P.CLS_BASKET)]
+    if len(prior):                     # basket fallback from before the window
+        b = prior[-1]
+        ext._last_basket = ((b[2] + b[4]) / 2, (b[3] + b[5]) / 2, b[4] - b[2], b[5] - b[3])
+    frames = []
+    for f in range(start, end + 1):
+        rows = boxes[boxes[:, 0] == f]
+        cls, xy = rows[:, 1], rows[:, 2:6]
+        feats = P._extract_features(ext, list(xy[cls == P.CLS_BALL]), list(xy[cls == P.CLS_PLAYER]),
+                                    list(xy[cls == P.CLS_BASKET]), fps)
+        ext.shot_data.append(feats)
+        frames.append(feats)
+    return frames
+
+
 class Feedback(BaseModel):
     job_id: str
     shot_number: int
-    label: int      # 1 made, 0 missed
+    label: int      # 1 made, 0 missed, -1 not a shot
 
 
 @app.post("/api/feedback")
 def feedback(fb: Feedback, user: User = Depends(current_user)):
-    """Save the shot's raw frames with the human label, in labeler-CSV format."""
-    if fb.label not in (0, 1):
-        raise HTTPException(400, "label must be 0 (missed) or 1 (made)")
+    """Label a shot: made (1), missed (0) or not a shot (-1)."""
+    if fb.label not in (0, 1, NOT_A_SHOT):
+        raise HTTPException(400, "label must be 1 (made), 0 (missed) or -1 (not a shot)")
     job = _job(fb.job_id, user)
     frames = job.get('shot_frames', {}).get(fb.shot_number)
     shot = next((s for s in (job.get('result') or {}).get('shots', [])
                  if s['shot_number'] == fb.shot_number), None)
     if frames is None or shot is None:
         raise HTTPException(404, "shot not found in this analysis")
+    labeled = _write_label(job, shot, frames, fb.label)
+    return {'saved': True, 'labeled_shots': labeled, 'summary': _summary(job['result']['shots'])}
 
-    df = pd.DataFrame(frames, columns=sf.RAW_COLS)
-    start = int(shot['start_frame'])
-    df['frame_count'] = start + np.arange(len(df))
-    df['frame_within_shot'] = np.arange(len(df))
-    df['shot_result'] = int(fb.label)
-    df['model_pred'] = int(shot['prediction'])
-    df['model_prob'] = shot['probability']
-    df['predictor'] = job['config']
-    df['source_video'] = job['video']
 
-    old = _load_feedback()
-    if not old.empty:
-        # relabeling the same shot replaces the previous rows
-        same = (old['source_video'] == job['video']) & (old['frame_count'].between(start, start + len(df) - 1))
-        old_shots = old.loc[same, 'shot_number'].unique()
-        old = old[~old['shot_number'].isin(old_shots)]
-    next_id = int(old['shot_number'].max()) + 1 if not old.empty else 1
-    df['shot_number'] = next_id
-    out = pd.concat([old, df], ignore_index=True) if not old.empty else df
-    FEEDBACK_CSV.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(FEEDBACK_CSV, index=False)
+class ManualShot(BaseModel):
+    job_id: str
+    time_s: float   # moment the ball reaches the hoop, in video seconds
+    label: int      # 1 made, 0 missed
 
-    shot['label'] = int(fb.label)
-    _save_session(job)
-    try:
-        FIRESTORE.update_label(job['uid'], job)
-    except Exception:
-        traceback.print_exc()
-    return {'saved': True, 'labeled_shots': int(out['shot_number'].nunique())}
+
+@app.post("/api/manual_shot")
+def manual_shot(ms: ManualShot, user: User = Depends(current_user)):
+    """Add a shot the detector missed, around time_s, with your made/missed label."""
+    if ms.label not in (0, 1):
+        raise HTTPException(400, "label must be 1 (made) or 0 (missed)")
+    job = _job(ms.job_id, user)
+    result = job.get('result')
+    if job.get('status') != 'done' or not result:
+        raise HTTPException(409, "analysis not finished")
+    if not Path(job.get('cache_path') or '').exists():
+        raise HTTPException(409, "detections for this video are no longer cached")
+    fps = result['fps'] or 30.0
+    total = int(result.get('total_frames') or 0)
+    center = int(round(ms.time_s * fps)) + 1                     # frames are 1-based
+    start = max(1, center - int(MANUAL_BEFORE_S * fps))
+    end = min(total, center + int(MANUAL_AFTER_S * fps)) if total else center + int(MANUAL_AFTER_S * fps)
+    if end <= start:
+        raise HTTPException(400, "time is outside the video")
+
+    frames = _frames_from_cache(job['cache_path'], start, end, fps)
+    shots = result['shots']
+    number = max((s['shot_number'] for s in shots), default=0) + 1
+    feats = sf.shot_to_features(np.array(frames, dtype=np.float64))
+    shot = {
+        'shot_number': number, 'prediction': None, 'prediction_text': 'ADDED',
+        'probability': None, 'confidence': None, 'manual': True,
+        'start_frame': start, 'end_frame': end, 'n_frames': len(frames),
+        'rim_offset': round(sf.rim_pass_offset(feats), 3), 'label': None,
+    }
+    shots.append(shot)
+    shots.sort(key=lambda s: s['start_frame'])
+    job.setdefault('shot_frames', {})[number] = frames
+    _write_label(job, shot, frames, ms.label)
+    return {'shot': shot, 'result': result, 'summary': _summary(shots)}
 
 
 @app.get("/api/stats")

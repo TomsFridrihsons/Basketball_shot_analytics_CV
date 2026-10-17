@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const SHOTS_KEY = 'hooperai_shots';
 const SESSION_KEY = 'hooperai_sessions';
+export const NOT_A_SHOT = -1;   // label for detections that were not real shots
 
 export async function saveShot(shot) {
   try {
@@ -34,7 +35,9 @@ export async function clearShots() {
 /** Shot record for the Home/Stats screens from a server shot. */
 function toShot(sessionId, s, fps, timestamp) {
   const labeled = s.label != null;
-  const predicted = s.prediction === 1 ? 'made' : 'missed';
+  // shots you added have no prediction; treat your label as the model's for stats
+  const predicted = s.prediction == null ? (s.label === 1 ? 'made' : 'missed')
+    : s.prediction === 1 ? 'made' : 'missed';
   const outcome = labeled ? (s.label === 1 ? 'made' : 'missed') : predicted;
   return {
     id: `${sessionId}-${s.shot_number}`,
@@ -43,9 +46,10 @@ function toShot(sessionId, s, fps, timestamp) {
     outcome,
     predicted,
     labeled,
-    correct: labeled ? outcome === predicted : null,
+    manual: !!s.manual,
+    correct: labeled && s.prediction != null ? outcome === predicted : null,
     // certainty of the predicted outcome, in %
-    confidence: Math.round(Math.max(s.probability, 1 - s.probability) * 100),
+    confidence: s.probability == null ? null : Math.round(Math.max(s.probability, 1 - s.probability) * 100),
     videoTime: fps ? (s.start_frame - 1) / fps : null,
     zone: null,
     timestamp,
@@ -62,7 +66,8 @@ export async function saveSession(sessionId, result, extra = {}) {
     const timestamp = extra.timestamp ?? previous?.timestamp ?? new Date().toISOString();
 
     const shots = (await getShots()).filter(s => s.sessionId !== sessionId);
-    const fresh = result.shots.map(s => toShot(sessionId, s, result.fps, timestamp)).reverse();
+    const fresh = result.shots.filter(s => s.label !== NOT_A_SHOT)
+      .map(s => toShot(sessionId, s, result.fps, timestamp)).reverse();
     const next = [...fresh, ...shots]
       .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
     await AsyncStorage.setItem(SHOTS_KEY, JSON.stringify(next));
@@ -99,34 +104,33 @@ export async function getSession(sessionId) {
 
 /** Summary numbers for a stored session (labels win over predictions). */
 export function sessionSummary(session) {
-  const shots = session?.result?.shots || [];
-  const made = shots.filter(s => (s.label ?? s.prediction) === 1).length;
-  const labeled = shots.filter(s => s.label != null).length;
-  return { total: shots.length, made, labeled, pct: shots.length ? Math.round((made / shots.length) * 100) : null };
+  return summarizeShots(session?.result?.shots || []);
 }
 
-/** Apply your made/missed label to a stored shot and its session. */
-export async function labelShot(sessionId, shotNumber, label) {
-  const shots = await getShots();
-  const next = shots.map(s => {
-    if (s.sessionId !== sessionId || s.shotNumber !== shotNumber) return s;
-    const outcome = label === 1 ? 'made' : 'missed';
-    return { ...s, outcome, labeled: true, correct: outcome === s.predicted };
-  });
-  await AsyncStorage.setItem(SHOTS_KEY, JSON.stringify(next));
+/** Same counts as the laptop's /api/sessions: "not a shot" detections are left
+ *  out of total/made but count as reviewed. */
+export function summarizeShots(shots) {
+  const real = shots.filter(s => s.label !== NOT_A_SHOT);
+  const made = real.filter(s => (s.label ?? s.prediction) === 1).length;
+  const labeled = shots.filter(s => s.label != null).length;
+  return { total: real.length, made, labeled, pct: real.length ? Math.round((made / real.length) * 100) : null };
+}
 
-  const sessions = await getSessions();
-  const updated = sessions.map(s => (s.id !== sessionId ? s : {
-    ...s,
-    result: { ...s.result, shots: s.result.shots.map(x => (x.shot_number === shotNumber ? { ...x, label } : x)) },
-  }));
-  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(updated));
-  return next;
+/** Apply your label (1 made, 0 missed, -1 not a shot) to a stored session. */
+export async function labelShot(sessionId, shotNumber, label) {
+  const session = await getSession(sessionId);
+  if (!session) return getShots();
+  const result = {
+    ...session.result,
+    shots: session.result.shots.map(x => (x.shot_number === shotNumber ? { ...x, label } : x)),
+  };
+  return saveSession(sessionId, result);   // rebuilds this session's shots for Home/Stats
 }
 
 /** How often the model agreed with your labels. */
 export function calcModelStats(shots) {
-  const labeled = shots.filter(s => s.labeled);
+  // shots you added yourself had no prediction to agree with
+  const labeled = shots.filter(s => s.labeled && s.correct != null);
   const right = labeled.filter(s => s.correct).length;
   return { labeled: labeled.length, right, pct: labeled.length ? Math.round((right / labeled.length) * 100) : null };
 }

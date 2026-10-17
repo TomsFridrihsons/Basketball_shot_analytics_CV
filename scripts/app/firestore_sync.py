@@ -33,11 +33,12 @@ class FirestoreSync:
             'shot_number': int(s['shot_number']),
             'start_s':     round((s['start_frame'] - 1) / fps, 2) if fps else None,
             'end_s':       round((s['end_frame'] - 1) / fps, 2) if fps else None,
-            'prediction':  int(s['prediction']),
-            'probability': float(s['probability']),
+            'prediction':  None if s.get('prediction') is None else int(s['prediction']),   # None: added by you
+            'probability': None if s.get('probability') is None else float(s['probability']),
             'confidence':  s['confidence'],
             'rim_offset':  s.get('rim_offset'),
-            'label':       s.get('label'),
+            'label':       s.get('label'),           # 1 made, 0 missed, -1 not a shot
+            'manual':      bool(s.get('manual')),
         }
 
     def save_session(self, uid: str, session: dict):
@@ -52,8 +53,9 @@ class FirestoreSync:
             'fps':          r['fps'],
             'total_frames': r['total_frames'],
             'shots':        shots,
-            'total':        len(shots),
-            'made':         sum(1 for s in shots if (s['label'] if s['label'] is not None else s['prediction']) == 1),
+            'total':        sum(1 for s in shots if s['label'] != -1),
+            'made':         sum(1 for s in shots if s['label'] != -1
+                                and (s['label'] if s['label'] is not None else s['prediction']) == 1),
         })
 
     def update_label(self, uid: str, session: dict):

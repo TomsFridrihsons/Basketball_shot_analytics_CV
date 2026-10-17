@@ -183,9 +183,12 @@ function renderShots() {
 
   shots.forEach((s, i) => {
     const made = s.prediction === 1;
+    const manual = s.prediction == null;
+    const notShot = s.label === -1;
     const li = document.createElement('li');
     li.className = 'shot' + (i === state.currentShot ? ' current' : '');
-    const verdict = s.label == null ? ''
+    const verdict = s.label == null || manual ? ''
+      : notShot ? '<span class="verdict">not a shot</span>'
       : s.label === s.prediction ? '<span class="verdict ok">✓ model right</span>'
       : '<span class="verdict bad">✗ model wrong</span>';
     const rim = s.rim_offset == null ? '–' : (s.rim_offset >= 2.99 ? 'no rim pass' : s.rim_offset.toFixed(2));
@@ -193,18 +196,19 @@ function renderShots() {
       <div class="shot-top">
         <span class="shot-num">#${s.shot_number}</span>
         <span class="shot-time">${fmtTime(shotTime(s))}</span>
-        <span class="chip ${made ? 'made' : 'missed'}">${made ? 'MADE' : 'MISSED'}</span>
+        <span class="chip ${manual ? '' : made ? 'made' : 'missed'}">${manual ? 'ADDED' : made ? 'MADE' : 'MISSED'}</span>
       </div>
       <div class="shot-meta">
         <span>score <b>${pct(s.probability)}</b></span>
-        <span>conf <b>${s.confidence.toLowerCase()}</b></span>
+        <span>conf <b>${s.confidence ? s.confidence.toLowerCase() : 'added by you'}</b></span>
         <span>rim offset <b>${rim}</b></span>
         <span><b>${s.n_frames}</b> frames</span>
       </div>
-      <div class="probbar"><div style="width:${s.probability * 100}%;background:${made ? 'var(--green)' : 'var(--orange)'}"></div></div>
+      <div class="probbar"><div style="width:${(s.probability || 0) * 100}%;background:${made ? 'var(--green)' : 'var(--orange)'}"></div></div>
       <div class="label-row">
         <button class="btn small ${s.label === 1 ? 'on-made' : ''}" data-label="1">Made</button>
         <button class="btn small ${s.label === 0 ? 'on-missed' : ''}" data-label="0">Missed</button>
+        ${manual ? '' : `<button class="btn small ${notShot ? 'on-missed' : ''}" data-label="-1">Not a shot</button>`}
         ${verdict}
       </div>`;
     li.onclick = (e) => {
@@ -237,7 +241,7 @@ async function label(i, value) {
       body: JSON.stringify({ job_id: state.jobId, shot_number: shot.shot_number, label: value }),
     });
     shot.label = value;
-    toast(`Shot #${shot.shot_number} labeled ${value ? 'MADE' : 'MISSED'} · ${r.labeled_shots} labeled total`);
+    toast(`Shot #${shot.shot_number} labeled ${value === 1 ? 'MADE' : value === 0 ? 'MISSED' : 'NOT A SHOT'} · ${r.labeled_shots} labeled total`);
     renderShots();
     renderTimeline();
     renderSummary();
@@ -255,7 +259,7 @@ function renderTimeline() {
   const n = state.result.total_frames || 1;
   state.result.shots.forEach((s, i) => {
     const seg = document.createElement('div');
-    seg.className = `seg ${s.prediction === 1 ? 'made' : 'missed'}`
+    seg.className = `seg ${(s.label ?? s.prediction) === 1 ? 'made' : 'missed'}`
       + (s.label != null && s.label !== s.prediction ? ' wrong' : '')
       + (i === state.currentShot ? ' current' : '');
     seg.style.left = `${(s.start_frame / n) * 100}%`;

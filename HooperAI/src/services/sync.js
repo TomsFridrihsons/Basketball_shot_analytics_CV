@@ -2,18 +2,10 @@
 // of truth for results and labels (labels may also come from the laptop's
 // browser test bench or another device). Runs when Home / Stats open.
 import * as api from './api';
-import { getSessions, saveSession } from '../utils/storage';
+import { getSessions, saveSession, summarizeShots } from '../utils/storage';
 
 let running = null;
 
-function summaryOf(result) {
-  const shots = result?.shots || [];
-  return {
-    total: shots.length,
-    made: shots.filter(s => (s.label ?? s.prediction) === 1).length,
-    labeled: shots.filter(s => s.label != null).length,
-  };
-}
 
 /** Pull new or changed sessions from the laptop. Resolves to true if anything changed.
  *  Silently does nothing when the laptop is offline. */
@@ -26,7 +18,7 @@ export function syncSessions() {
       const local = new Map((await getSessions()).map(s => [s.id, s]));
       for (const r of remote) {
         const mine = local.get(r.id);
-        const sum = mine?.result ? summaryOf(mine.result) : null;
+        const sum = mine?.result ? summarizeShots(mine.result.shots || []) : null;
         const same = sum && sum.total === r.total && sum.labeled === r.labeled && sum.made === r.made;
         if (same) continue;
         try {
