@@ -96,7 +96,7 @@ if __name__ == "__main__":
     ap.add_argument("--conf", type=float, default=infer.YOLO_CONF, help="basket / player threshold")
     ap.add_argument("--config", default=str(RIM_RULE_CONFIG), help="predictor config")
     ap.add_argument("--sweep", action="store_true", help="evaluate a grid of thresholds")
-    ap.add_argument("--trigger", choices=["new", "old"], default="new",
+    ap.add_argument("--trigger", choices=["new", "old"], default="new" if infer.NEW_TRIGGER else "old",
                     help="new: hoop zone + aim check (HPAI-20); old: ball above the players")
     ap.add_argument("--tag", default="", help="name for the saved results file")
     args = ap.parse_args()
