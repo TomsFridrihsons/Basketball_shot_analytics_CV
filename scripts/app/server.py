@@ -106,11 +106,11 @@ def _predictor_configs():
         if kind == 'lstm' and c.get('feature_version', 1) < 2:
             continue   # legacy v1–v5 models: leaked evaluation, not worth testing
         cv = c.get('cv_metrics', {})
-        video_cv = cv.get('video_rim_rule' if kind == 'rim_rule' else 'video', {})
+        video_cv = cv.get({'rim_rule': 'video_rim_rule', 'trajectory_judge': 'video_judge'}.get(kind, 'video'), {})
         out.append({
             'config': cfg.name,
-            'label': 'Rim-pass rule' if kind == 'rim_rule'
-                     else cfg.name.replace('basketball_shot_', '').replace('_config.pkl', '').upper(),
+            'label': {'rim_rule': 'Rim-pass rule', 'trajectory_judge': 'Trajectory judge (net check)'}.get(
+                kind, cfg.name.replace('basketball_shot_', '').replace('_config.pkl', '').upper()),
             'kind': kind,
             'unseen_video_accuracy': video_cv.get('accuracy'),
         })

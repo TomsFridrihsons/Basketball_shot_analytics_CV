@@ -58,6 +58,7 @@ from tensorflow.keras.callbacks import EarlyStopping
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from paths import ANNOTATIONS_DIR, MODEL_DIR  # noqa: E402
 import shot_features as sf  # noqa: E402
+import shot_judge  # noqa: E402
 
 DATA_PATHS = [
     str(ANNOTATIONS_DIR / "basketball_shot_data_labeled_04_05.csv"),
@@ -320,6 +321,76 @@ def save_rim_rule(shots, cv_results: dict):
     return config
 
 
+RATIO_GRID = [None, 0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.2]   # None = no net check
+
+
+def _judge_signals(shots):
+    return [shot_judge.signals(sf.shot_to_features(s['raw'], FEAT_VERSION)) for s in shots]
+
+
+def _judge_predict(sigs, params):
+    return np.array([shot_judge.decide(s, params)[0] for s in sigs])
+
+
+def _fit_judge(sigs, labels, offset_key):
+    """Grid-search offset and fall-ratio thresholds for the best training accuracy
+    (ties → no net check, then the larger ratio threshold: fewest overrides)."""
+    best, best_key = None, None
+    for t_off in np.linspace(0.1, 1.5, 29):
+        for t_ratio in RATIO_GRID:
+            p = {'offset': offset_key, 'offset_threshold': float(t_off), 'ratio_threshold': t_ratio}
+            acc = (_judge_predict(sigs, p) == labels).mean()
+            key = (acc, t_ratio is None, t_ratio or 0)
+            if best_key is None or key > best_key:
+                best, best_key = p, key
+    return best
+
+
+def judge_cv(shots, mode: str, offset_key: str = 'rim_offset'):
+    """Trajectory judge (HPAI-21): rim offset + net fall-speed check; thresholds
+    picked on the training fold."""
+    sigs = _judge_signals(shots)
+    labels = np.array([s['label'] for s in shots])
+    print(f"\n── CV: {mode} (trajectory judge, {offset_key}) " + "─" * 12)
+    all_y, all_pred = [], []
+    for train_idx, test_idx, name in _folds(shots, mode):
+        p = _fit_judge([sigs[i] for i in train_idx], labels[train_idx], offset_key)
+        pred = _judge_predict([sigs[i] for i in test_idx], p).astype(float)
+        rt = p['ratio_threshold']
+        print(f"  {name:<45} off {p['offset_threshold']:.2f} ratio {rt if rt else '-':<5} "
+              f"{_fmt(metrics(labels[test_idx], pred, 0.5))}")
+        all_y.append(labels[test_idx])
+        all_pred.append(pred)
+    pooled = metrics(np.concatenate(all_y), np.concatenate(all_pred), 0.5)
+    print(f"  {'POOLED':<45} {'':>23}{_fmt(pooled)}")
+    return pooled
+
+
+def save_judge(shots, cv_results: dict, offset_key: str = 'rim_offset'):
+    """Fit the judge on all shots and save a config lstm_infer.py can load."""
+    sigs = _judge_signals(shots)
+    labels = np.array([s['label'] for s in shots])
+    p = _fit_judge(sigs, labels, offset_key)
+    config = {
+        'model_type':        'trajectory_judge',
+        'feature_version':   FEAT_VERSION,
+        'judge_params':      p,
+        'optimal_threshold': 0.5,
+        'max_len':           sf.MAX_LEN,
+        'feature_cols':      sf.FEATURE_COLS,
+        'train_metrics':     metrics(labels, _judge_predict(sigs, p).astype(float), 0.5),
+        'cv_metrics':        {k: v for k, v in cv_results.items() if 'judge' in k},
+        'data_paths':        [Path(p_).name for p_ in DATA_PATHS],
+    }
+    base = os.path.join(MODEL_SAVE_DIR, "basketball_shot_trajectory_judge_config")
+    with open(base + ".pkl", 'wb') as f:
+        pickle.dump(config, f)
+    with open(base + ".json", 'w') as f:
+        json.dump(config, f, indent=4, default=str)
+    print(f"\n── Trajectory judge: {p} → {base}.pkl")
+    return config
+
+
 def rim_rule_cv(shots, mode: str):
     """Baseline without learning: made if the ball drops through rim height within
     `t` basket widths of the rim centre; `t` is picked on the training fold."""
@@ -463,10 +534,13 @@ if __name__ == "__main__":
     cv_results = {}
     for mode in modes:
         cv_results[f"{mode}_rim_rule"] = rim_rule_cv(shots, mode)
+        cv_results[f"{mode}_judge"] = judge_cv(shots, mode)
+        cv_results[f"{mode}_judge_crossing"] = judge_cv(shots, mode, 'crossing_offset')
         if not args.rule_only:
             cv_results[mode] = cross_validate(shots, mode)
 
     if not args.no_save:
         save_rim_rule(shots, cv_results)
+        save_judge(shots, cv_results)
         if not args.rule_only:
             train_final(shots, cv_results)
