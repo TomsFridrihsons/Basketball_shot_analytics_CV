@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HooperAI Test Bench</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="ball" aria-hidden="true"></span>
+      <span class="brand-name">HooperAI</span>
+      <span class="brand-sub">test bench</span>
+    </div>
+
+    <div class="controls">
+      <label class="field">
+        <span>Predictor</span>
+        <select id="predictor"></select>
+      </label>
+      <label class="field conf">
+        <span>YOLO conf <b id="confValue">0.75</b></span>
+        <input id="conf" type="range" min="0.3" max="0.95" step="0.05" value="0.75">
+      </label>
+      <button id="analyze" class="btn primary" disabled>Analyze video</button>
+    </div>
+
+    <div id="device" class="badge" title="Device used for YOLO">…</div>
+  </header>
+
+  <main class="layout">
+    <!-- Library -->
+    <aside class="panel library">
+      <div class="panel-head">
+        <h2>Videos</h2>
+        <label class="btn ghost small" title="Copy a video into data/raw/videos">
+          Upload<input id="upload" type="file" accept="video/*" hidden>
+        </label>
+      </div>
+      <input id="search" class="search" type="search" placeholder="Filter videos">
+      <ul id="videos" class="video-list" aria-label="Video library"></ul>
+
+      <section class="card stats" aria-label="Labeling stats">
+        <h3>Your labels</h3>
+        <div class="stat-grid">
+          <div><b id="stLabeled">0</b><span>labeled shots</span></div>
+          <div><b id="stFg">–</b><span>FG%</span></div>
+          <div><b id="stAcc">–</b><span>model correct</span></div>
+          <div><b id="stVideos">0</b><span>videos</span></div>
+        </div>
+        <p class="hint">Saved to <code>app_labeled.csv</code>; add it to <code>DATA_PATHS</code> to retrain.</p>
+      </section>
+    </aside>
+
+    <!-- Player -->
+    <section class="stage">
+      <div id="player" class="player empty">
+        <video id="video" playsinline preload="metadata"></video>
+        <canvas id="overlay"></canvas>
+        <div id="banner" class="banner" hidden></div>
+        <div id="emptyMsg" class="empty-msg">
+          <p class="big">Pick a video on the left</p>
+          <p>Then press <b>Analyze video</b> to run detection, shot detection and the predictor.</p>
+        </div>
+      </div>
+
+      <div id="progress" class="progress" hidden>
+        <div class="progress-bar"><div id="progressFill"></div></div>
+        <span id="progressText">Starting…</span>
+      </div>
+
+      <div class="timeline-wrap">
+        <div id="timeline" class="timeline" title="Shots – click to jump"></div>
+        <div class="legend">
+          <span><i class="dot made"></i>predicted made</span>
+          <span><i class="dot missed"></i>predicted missed</span>
+          <span><i class="dot wrong"></i>you disagreed</span>
+          <label class="toggle"><input id="showBoxes" type="checkbox" checked> boxes</label>
+          <span class="keys">Space play · J/K prev/next shot · M made · X missed</span>
+        </div>
+      </div>
+
+      <div class="summary" id="summary"></div>
+    </section>
+
+    <!-- Shots -->
+    <aside class="panel shots">
+      <div class="panel-head">
+        <h2>Shots</h2>
+        <span id="shotCount" class="muted"></span>
+      </div>
+      <ol id="shots" class="shot-list" aria-label="Detected shots">
+        <li class="placeholder">No analysis yet.</li>
+      </ol>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

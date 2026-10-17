@@ -112,3 +112,6 @@ secrets/
 # Archived datasets (moved to archives/)
 Hooper-2/
 HooperAnalytic-1/
+
+# Local tool config
+.claude/

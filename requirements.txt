@@ -16,3 +16,8 @@ pyyaml>=6.0
 
 # Plotting
 matplotlib>=3.7.0
+
+# Laptop test app (scripts/app/server.py)
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
