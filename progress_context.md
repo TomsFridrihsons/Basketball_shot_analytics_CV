@@ -67,6 +67,7 @@ phone ◄──────── shots, review, labels ────────
 | D16 | **Default predictor = rim-pass rule on features v3** (track cleaning + parabola gap fill ≤ 1 s, threshold 0.40) | 96.7% unseen-video vs 92.9% for v2; trajectory judge gives identical end-to-end results, kept optional | HPAI-19/21/24 |
 | D17 | **Old start trigger (ball above players) stays default**; hoop-zone trigger + aim check behind `NEW_TRIGGER` | New trigger: 99.4% shots found but 17 false vs 3 – more total errors; needs a stricter aim/false-shot filter first | HPAI-20/24 |
 | D18 | Shot metrics (speed, release/entry angle, arc) shown only when `reliable` (gravity check 0.6–1.6 g) | Camera behind the shooter makes depth unknown; 80/184 shots pass | HPAI-22 |
+| D19 | **Data is per account on both ends**: phone cache keys end in the Firebase uid; uploaded videos have an owner (`data/processed/app_video_owners.json`), Firebase users only reach their own; videos copied onto the laptop by hand are for localhost / API-key use only | Two accounts on one phone shared the cache; any account could stream or analyze any video by name | HPAI-28 |
 
 ---
 
@@ -152,7 +153,7 @@ cd HooperAI && npx expo start                      # app; Expo Go → exp://<lap
 
 ## 8. Ticket log (HPAI-XX)
 
-Next free ticket: **HPAI-28**. Workflow: `docs/WORKFLOW.md`.
+Next free ticket: **HPAI-29**. Workflow: `docs/WORKFLOW.md`.
 
 | Ticket | Type | Title | Status |
 |---|---|---|---|
@@ -183,6 +184,7 @@ Next free ticket: **HPAI-28**. Workflow: `docs/WORKFLOW.md`.
 | HPAI-25 | feature | Record + Session screens redesign (Apple HIG): full-bleed camera, one panel per state (permission, ready, offline, upload/analyze steps, done, error), review on the Session screen, 11 pt minimum text, red only for recording | Done |
 | HPAI-26 | feature | Stats screen redesign (Apple HIG charts): 7/30 days/All period, FG% with change vs previous period, FG% per session bar chart with average and VoiceOver summary, volume, average shot metrics (reliable shots only), detection trust card | Done |
 | HPAI-27 | feature | Settings + Login redesign (Apple HIG): grouped settings that save as you type, live laptop status, predictor checkmark list, in-app account deletion; login with labelled fields, show/hide password, disabled-until-valid button | Done |
+| HPAI-28 | bugfix | Accounts saw each other's data: phone cache scoped per Firebase uid (old shared cache dropped, re-synced from laptop); server records video owners and limits list/stream/analyze to them; /api/stats laptop-only | Done |
 
 ---
 

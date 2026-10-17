@@ -5,6 +5,7 @@ the predictor and Firestore are replaced by fakes, all paths point to tmp dirs.
     python -m pytest tests -q
 """
 
+import json
 import sys
 import time
 import pickle
@@ -98,8 +99,8 @@ def env(tmp_path, monkeypatch):
 KEY = {"X-API-Key": "secret"}
 
 
-def _analyze(client, headers=KEY):
-    r = client.post("/api/analyze", json={"video": "clip.mp4"}, headers=headers)
+def _analyze(client, headers=KEY, video="clip.mp4"):
+    r = client.post("/api/analyze", json={"video": video}, headers=headers)
     assert r.status_code == 200, r.text
     job_id = r.json()["job_id"]
     for _ in range(100):
@@ -220,7 +221,9 @@ def test_firebase_users_are_isolated(env, monkeypatch):
     bob = {"Authorization": "Bearer tok-bob"}
     c = env['client']
 
-    job_id, job = _analyze(c, alice)
+    name = c.post("/api/videos", files={"file": ("a.mp4", b"abc" * 100, "video/mp4")},
+                  headers=alice).json()["name"]
+    job_id, job = _analyze(c, alice, video=name)
     assert job["status"] == "done"
     assert env['firestore'].saved[-1][:2] == ("alice", job_id)
     assert c.get(f"/api/jobs/{job_id}", headers=bob).status_code == 404
@@ -230,6 +233,31 @@ def test_firebase_users_are_isolated(env, monkeypatch):
 
     c.post("/api/feedback", json={"job_id": job_id, "shot_number": 2, "label": 0}, headers=alice)
     assert env['firestore'].saved[-1] == ("alice", job_id, [None, 0])
+
+
+def _firebase(monkeypatch):
+    monkeypatch.setattr(server.AUTH, "mode", "firebase")
+    monkeypatch.setattr(server.AUTH, "verify_firebase",
+                        lambda token: User(uid=token.replace("tok-", ""), mode="firebase"))
+    return {"Authorization": "Bearer tok-alice"}, {"Authorization": "Bearer tok-bob"}
+
+
+def test_firebase_users_only_see_their_own_videos(env, monkeypatch):
+    alice, bob = _firebase(monkeypatch)
+    c = env['client']
+    name = c.post("/api/videos", files={"file": ("a.mp4", b"abc" * 100, "video/mp4")},
+                  headers=alice).json()["name"]
+
+    assert [v["name"] for v in c.get("/api/videos", headers=alice).json()] == [name]
+    assert c.get("/api/videos", headers=bob).json() == []
+    assert c.get(f"/api/videos/{name}/stream", headers=bob).status_code == 404
+    assert c.post("/api/analyze", json={"video": name}, headers=bob).status_code == 404
+    # videos copied onto the laptop by hand belong to nobody: not for Firebase users
+    assert c.post("/api/analyze", json={"video": "clip.mp4"}, headers=bob).status_code == 404
+    assert c.get("/api/stats", headers=bob).status_code == 403
+
+    job_id, job = _analyze(c, alice, video=name)
+    assert job["status"] == "done"
 
 
 def test_upload_keeps_original_and_prefixes_name(env):
@@ -260,3 +288,19 @@ def test_refuses_open_network_without_auth(monkeypatch):
     a.check_host("127.0.0.1")          # fine
     with pytest.raises(SystemExit):
         a.check_host("0.0.0.0")
+
+
+def test_earlier_uploads_get_the_owner_of_their_session(env, monkeypatch):
+    alice, bob = _firebase(monkeypatch)
+    sessions = env['tmp'] / "sessions"
+    sessions.mkdir(exist_ok=True)
+    (env['tmp'] / "videos" / "app_old.mp4").write_bytes(b"\x00" * 10)
+    (sessions / "abc.json").write_text(json.dumps(
+        {'id': 'abc', 'uid': 'alice', 'video': 'app_old.mp4', 'config': 'x', 'created': '2026-10-01T10:00:00',
+         'status': 'done', 'result': {'shots': []}}), encoding="utf-8")
+
+    assert server.backfill_video_owners() == 1
+    c = env['client']
+    assert [v["name"] for v in c.get("/api/videos", headers=alice).json()] == ["app_old.mp4"]
+    assert c.get("/api/videos", headers=bob).json() == []
+    assert [s["id"] for s in c.get("/api/sessions", headers=alice).json()] == ["abc"]

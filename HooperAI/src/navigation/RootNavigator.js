@@ -7,6 +7,7 @@ import SessionScreen from '../screens/SessionScreen';
 import LoginScreen from '../screens/LoginScreen';
 import { isFirebaseConfigured } from '../config';
 import { onUserChanged } from '../services/auth';
+import { setStorageOwner } from '../utils/storage';
 import { colors } from '../utils/theme';
 
 const Stack = createStackNavigator();
@@ -14,7 +15,11 @@ const Stack = createStackNavigator();
 export default function RootNavigator() {
   // Without Firebase there is no sign-in; the app goes straight to the tabs.
   const [user, setUser] = useState(undefined);   // undefined = still restoring the session
-  useEffect(() => onUserChanged(setUser), []);
+  // Point the local cache at this account before any screen reads it
+  useEffect(() => onUserChanged(async (u) => {
+    await setStorageOwner(u?.uid);
+    setUser(u);
+  }), []);
 
   if (isFirebaseConfigured && user === undefined) {
     return (
@@ -30,7 +35,8 @@ export default function RootNavigator() {
         <Stack.Screen name="Login" component={LoginScreen} />
       ) : (
         <>
-          <Stack.Screen name="Tabs" component={TabNavigator} />
+          {/* keyed by account so a different user never sees the previous one's screens */}
+          <Stack.Screen name="Tabs" component={TabNavigator} key={user?.uid || 'local'} />
           <Stack.Screen name="Settings" component={SettingsScreen} />
           <Stack.Screen name="Session" component={SessionScreen} />
         </>
