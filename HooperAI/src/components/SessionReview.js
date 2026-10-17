@@ -60,7 +60,7 @@ function ShotRow({ shot, fps, active, playing, onPlay, onLabel }) {
             <>
               <Text style={styles.predLabel}>model says</Text>
               <View style={[styles.chip, made ? styles.chipMade : styles.chipMissed]}>
-                <Text style={[styles.chipText, { color: made ? colors.green : colors.orange }]}>
+                <Text style={[styles.chipText, { color: made ? colors.green : colors.text }]}>
                   {made ? 'MADE' : 'MISSED'}
                 </Text>
               </View>
@@ -69,22 +69,23 @@ function ShotRow({ shot, fps, active, playing, onPlay, onLabel }) {
         </View>
       </TouchableOpacity>
 
-      <View style={styles.labelRow}>
-        <Text style={styles.youSay}>You:</Text>
+      <View style={styles.labelRow} accessibilityRole="radiogroup" accessibilityLabel="Your call">
         <TouchableOpacity style={[styles.labelBtn, shot.label === 1 && styles.labelMadeOn]}
-          onPress={() => onLabel(1)} activeOpacity={0.8}>
-          <Ionicons name="checkmark" size={15} color={shot.label === 1 ? colors.green : colors.textMuted} />
+          onPress={() => onLabel(1)} activeOpacity={0.8}
+          accessibilityRole="radio" accessibilityState={{ checked: shot.label === 1 }} accessibilityLabel="Made">
+          <Ionicons name="checkmark" size={16} color={shot.label === 1 ? colors.green : colors.textMuted} />
           <Text style={[styles.labelText, shot.label === 1 && { color: colors.green }]}>Made</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.labelBtn, shot.label === 0 && styles.labelMissOn]}
-          onPress={() => onLabel(0)} activeOpacity={0.8}>
-          <Ionicons name="close" size={15} color={shot.label === 0 ? colors.orange : colors.textMuted} />
-          <Text style={[styles.labelText, shot.label === 0 && { color: colors.orange }]}>Missed</Text>
+          onPress={() => onLabel(0)} activeOpacity={0.8}
+          accessibilityRole="radio" accessibilityState={{ checked: shot.label === 0 }} accessibilityLabel="Missed">
+          <Ionicons name="close" size={16} color={shot.label === 0 ? colors.white : colors.textMuted} />
+          <Text style={[styles.labelText, shot.label === 0 && { color: colors.white }]}>Missed</Text>
         </TouchableOpacity>
         {!manual && (
           <TouchableOpacity style={[styles.labelBtn, styles.notShotBtn, notShot && styles.notShotOn]}
             onPress={() => onLabel(NOT_A_SHOT)} activeOpacity={0.8}
-            accessibilityLabel="Not a real shot">
+            accessibilityRole="radio" accessibilityState={{ checked: notShot }} accessibilityLabel="Not a real shot">
             <Ionicons name="ban-outline" size={14} color={notShot ? colors.white : colors.textMuted} />
             <Text style={[styles.labelText, notShot && { color: colors.white }]}>Not a shot</Text>
           </TouchableOpacity>
@@ -96,8 +97,8 @@ function ShotRow({ shot, fps, active, playing, onPlay, onLabel }) {
         </Text>
       )}
       {verdict != null && (
-        <Text style={[styles.verdict, { color: verdict ? colors.green : colors.yellow }]}>
-          {verdict ? '✓ Model was right' : '✗ Model was wrong – thanks, this helps the most'}
+        <Text style={[styles.verdict, { color: colors.textMuted }]}>
+          {verdict ? 'Matches the model' : 'You corrected the model – these labels help the most'}
         </Text>
       )}
     </View>
@@ -117,11 +118,12 @@ function AddShotBar({ time, disabled, busy, onAdd }) {
         </TouchableOpacity>
         <TouchableOpacity style={[styles.addChoice, styles.labelMissOn]} disabled={busy}
           onPress={async () => { await onAdd(0); setChoosing(false); }}>
-          <Text style={[styles.labelText, { color: colors.orange }]}>Missed</Text>
+          <Text style={[styles.labelText, { color: colors.white }]}>Missed</Text>
         </TouchableOpacity>
         {busy ? <ActivityIndicator size="small" color={colors.orange} />
           : (
-            <TouchableOpacity onPress={() => setChoosing(false)} accessibilityLabel="Cancel adding a shot">
+            <TouchableOpacity onPress={() => setChoosing(false)} accessibilityLabel="Cancel adding a shot"
+              style={styles.addClose}>
               <Ionicons name="close" size={20} color={colors.textDim} />
             </TouchableOpacity>
           )}
@@ -130,11 +132,11 @@ function AddShotBar({ time, disabled, busy, onAdd }) {
   }
   return (
     <TouchableOpacity style={[styles.addBar, disabled && { opacity: 0.4 }]} disabled={disabled}
-      onPress={() => setChoosing(true)} activeOpacity={0.8}>
-      <Ionicons name="add-circle-outline" size={20} color={colors.orange} />
+      onPress={() => setChoosing(true)} activeOpacity={0.8} accessibilityRole="button">
+      <Ionicons name="add-circle-outline" size={22} color={colors.text} />
       <View style={{ flex: 1 }}>
-        <Text style={styles.addTitle}>Add a missed shot at {fmt(time)}</Text>
-        <Text style={styles.addText}>Pause where the ball reaches the hoop, then tap here.</Text>
+        <Text style={styles.addTitle}>Add a shot at {fmt(time)}</Text>
+        <Text style={styles.addText}>For shots the detector missed: pause where the ball reaches the hoop, then tap.</Text>
       </View>
     </TouchableOpacity>
   );
@@ -279,10 +281,15 @@ export default function SessionReview({ session, footer }) {
       <View style={styles.summary}>
         <Stat value={total} label="shots" />
         <Stat value={made} label="made" color={colors.green} />
-        <Stat value={total ? `${Math.round((made / total) * 100)}%` : '—'} label="FG%"
-          color={total ? (made / total >= 0.5 ? colors.green : colors.orange) : undefined} />
+        <Stat value={total ? `${Math.round((made / total) * 100)}%` : '–'} label="FG%" />
         <Stat value={`${labeled}/${shots.length}`} label="reviewed" />
       </View>
+      {shots.length > 0 && (
+        <View style={styles.reviewTrack} accessibilityRole="progressbar"
+          accessibilityLabel={`${labeled} of ${shots.length} shots reviewed`}>
+          <View style={[styles.reviewFill, { width: `${(labeled / shots.length) * 100}%` }]} />
+        </View>
+      )}
 
       <AddShotBar time={time} disabled={videoState !== 'ready'} busy={adding} onAdd={addShot} />
 
@@ -296,14 +303,14 @@ export default function SessionReview({ session, footer }) {
           <Text style={styles.hint}>
             {labeled === shots.length
               ? 'All shots reviewed – these labels train the next model.'
-              : 'Tap a shot to watch it, then tell us if it went in (or wasn\'t a shot).'}
+              : 'Tap a shot to watch it, then mark whether it went in.'}
           </Text>
         ) : null}
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={styles.emptyText}>No shots were detected in this clip.</Text>
             <Text style={styles.emptyHint}>Missed one? Play the video, pause where the ball
-              reaches the hoop and use "Add a missed shot" above.</Text>
+              reaches the hoop and use "Add a shot" above.</Text>
           </View>
         }
         renderItem={({ item, index }) => (
@@ -335,70 +342,70 @@ const styles = StyleSheet.create({
   banner: {
     position: 'absolute', top: 10, left: 10, backgroundColor: 'rgba(0,0,0,0.65)',
     borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: 4,
-    borderWidth: 0.5, borderColor: 'rgba(200,169,0,0.5)',
   },
-  bannerText: { color: colors.yellow, fontSize: font.sm, fontWeight: '700' },
+  bannerText: { color: colors.white, fontSize: font.sm, fontWeight: '700' },
 
   summary: {
     flexDirection: 'row', paddingVertical: spacing.md, paddingHorizontal: spacing.lg,
-    borderBottomWidth: 0.5, borderBottomColor: '#1e1e1e',
   },
+  reviewTrack: { height: 3, backgroundColor: colors.bgCard, marginHorizontal: spacing.lg, borderRadius: radius.full, overflow: 'hidden' },
+  reviewFill: { height: '100%', backgroundColor: colors.textMuted },
   stat: { flex: 1, alignItems: 'center' },
-  statVal: { fontSize: font.lg, fontWeight: '600', color: colors.white },
+  statVal: { fontSize: 20, fontWeight: '700', color: colors.white, fontVariant: ['tabular-nums'] },
   statLbl: { fontSize: font.xs, color: colors.textDim, marginTop: 2 },
 
   list: { padding: spacing.lg, gap: spacing.sm, paddingBottom: spacing.xxl },
-  hint: { color: colors.textDim, fontSize: font.sm, marginBottom: spacing.xs },
+  hint: { color: colors.textMuted, fontSize: font.base, marginBottom: spacing.xs },
   empty: { alignItems: 'center', paddingVertical: spacing.xxl, gap: spacing.xs },
   emptyText: { color: colors.text, fontSize: font.base },
-  emptyHint: { color: colors.textDim, fontSize: font.sm },
+  emptyHint: { color: colors.textMuted, fontSize: font.base, textAlign: 'center' },
 
   row: {
     backgroundColor: colors.bgCard, borderRadius: radius.lg, padding: spacing.md,
     borderWidth: 0.5, borderColor: colors.border, gap: spacing.md,
   },
-  rowActive: { borderColor: 'rgba(255,255,255,0.5)' },
+  rowActive: { borderColor: colors.textMuted },
   rowNotShot: { opacity: 0.6 },
   struck: { textDecorationLine: 'line-through', color: colors.textMuted },
   rowTop: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   playBtn: {
-    width: 32, height: 32, borderRadius: 16, backgroundColor: colors.bgCardDeep,
+    width: 36, height: 36, borderRadius: 18, backgroundColor: colors.bgCardDeep,
     borderWidth: 0.5, borderColor: colors.border, alignItems: 'center', justifyContent: 'center',
   },
   playBtnOn: { backgroundColor: colors.orange, borderColor: colors.orange },
-  rowTitle: { color: colors.white, fontSize: font.base, fontWeight: '500' },
-  rowMeta: { color: colors.textDim, fontSize: font.xs, marginTop: 2 },
-  rowMetrics: { color: colors.textMuted, fontSize: font.xs, marginTop: 2 },
+  rowTitle: { color: colors.white, fontSize: font.md, fontWeight: '600' },
+  rowMeta: { color: colors.textMuted, fontSize: font.sm, marginTop: 2 },
+  rowMetrics: { color: colors.textMuted, fontSize: font.sm, marginTop: 2 },
   predCol: { alignItems: 'flex-end', gap: 3 },
-  predLabel: { color: colors.textGhost, fontSize: 9, textTransform: 'uppercase', letterSpacing: 0.6 },
+  predLabel: { color: colors.textDim, fontSize: font.xs, textTransform: 'uppercase', letterSpacing: 0.6 },
   chip: { borderRadius: radius.full, paddingHorizontal: spacing.sm, paddingVertical: 2, borderWidth: 0.5 },
   chipMade: { backgroundColor: colors.greenFade, borderColor: colors.greenBorder },
-  chipMissed: { backgroundColor: colors.orangeFade, borderColor: colors.orangeBorder },
+  chipMissed: { backgroundColor: 'transparent', borderColor: colors.textDim },
   chipText: { fontSize: font.xs, fontWeight: '700', letterSpacing: 0.5 },
   chipManual: { backgroundColor: colors.bgCardDeep, borderColor: colors.border },
 
   labelRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  youSay: { color: colors.textDim, fontSize: font.sm, width: 32 },
   labelBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5,
     backgroundColor: colors.bgCardDeep, borderWidth: 0.5, borderColor: colors.border,
-    borderRadius: radius.md, paddingVertical: 9,
+    borderRadius: radius.md, minHeight: 44,
   },
   labelMadeOn: { borderColor: colors.greenBorder, backgroundColor: colors.greenFade },
-  labelMissOn: { borderColor: colors.orangeBorder, backgroundColor: colors.orangeFade },
-  labelText: { color: colors.textMuted, fontSize: font.sm },
+  labelMissOn: { borderColor: colors.textMuted, backgroundColor: '#262626' },
+  labelText: { color: colors.textMuted, fontSize: font.base, fontWeight: '500' },
   notShotBtn: { flex: 1.1 },
   notShotOn: { backgroundColor: '#2a2a2a', borderColor: '#555' },
   addBar: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
     marginHorizontal: spacing.lg, marginTop: spacing.md, padding: spacing.md,
-    borderRadius: radius.md, borderWidth: 0.5, borderColor: colors.orangeBorder,
-    backgroundColor: colors.orangeFade,
+    borderRadius: radius.md, borderWidth: 0.5, borderColor: colors.border,
+    backgroundColor: colors.bgCard, minHeight: 56,
   },
+  addClose: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   addTitle: { color: colors.white, fontSize: font.base, fontWeight: '500' },
-  addText: { color: colors.textMuted, fontSize: font.xs },
+  addText: { color: colors.textMuted, fontSize: font.sm },
   addChoice: {
-    flex: 1, alignItems: 'center', paddingVertical: 8, borderRadius: radius.md, borderWidth: 0.5,
+    flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 44, borderRadius: radius.md, borderWidth: 0.5,
   },
-  verdict: { fontSize: font.xs, marginTop: -4 },
+  verdict: { fontSize: font.sm, marginTop: -4 },
 });

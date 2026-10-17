@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, Animated, Alert, ActivityIndicator,
+  View, Text, TouchableOpacity, StyleSheet, Animated, Alert, ActivityIndicator, Linking,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
@@ -8,61 +8,63 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, radius, spacing, font } from '../utils/theme';
-import { Card } from '../components';
-import SessionReview from '../components/SessionReview';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { saveSession } from '../utils/storage';
+import { saveSession, summarizeShots } from '../utils/storage';
 import * as api from '../services/api';
 
-// Flow: idle → recording → ready (have a clip) → uploading → analyzing → results
+// Flow: idle → recording → ready (have a clip) → uploading → analyzing → done
+//                                  ↑ error ←───────────┘
 // The video is uploaded in original quality; only results come back.
+// Review happens on the Session screen, the same one Home opens.
 
 const PENDING_KEY = 'hooperai_pending_job';   // analysis still running on the laptop
 
 const fmtTime = (s) => (s == null ? '' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`);
-const pct = (x) => `${Math.round(x * 100)}%`;
 
-// ── Record button ────────────────────────────────────────────────────────────
-function RecordButton({ recording, disabled, onPress }) {
-  const scaleAnim = useRef(new Animated.Value(1)).current;
-
+// ── Shutter: red means recording, and only that ─────────────────────────────
+function Shutter({ recording, disabled, onPress }) {
+  const scale = useRef(new Animated.Value(1)).current;
   useEffect(() => {
-    if (recording) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(scaleAnim, { toValue: 1.06, duration: 800, useNativeDriver: true }),
-          Animated.timing(scaleAnim, { toValue: 1,    duration: 800, useNativeDriver: true }),
-        ])
-      ).start();
-    } else {
-      scaleAnim.stopAnimation();
-      scaleAnim.setValue(1);
-    }
+    Animated.spring(scale, { toValue: recording ? 0.42 : 1, useNativeDriver: true, speed: 20 }).start();
   }, [recording]);
-
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.85} disabled={disabled}
-      accessibilityLabel={recording ? 'Stop recording' : 'Start recording'}>
-      <Animated.View style={[styles.recOuter, disabled && { opacity: 0.35 }, { transform: [{ scale: scaleAnim }] }]}>
-        <View style={[styles.recInner, recording && styles.recInnerStop]} />
-      </Animated.View>
+      style={[styles.shutter, disabled && { opacity: 0.4 }]}
+      accessibilityRole="button" accessibilityLabel={recording ? 'Stop recording' : 'Start recording'}>
+      <Animated.View style={[styles.shutterInner, recording && styles.shutterStop, { transform: [{ scale }] }]} />
     </TouchableOpacity>
   );
 }
 
-// ── Progress bar ─────────────────────────────────────────────────────────────
-function Progress({ label, value }) {
+// ── Determinate bar; the step text says what is happening, not "loading" ─────
+function ProgressBar({ value }) {
   return (
-    <Card style={styles.progressCard}>
-      <View style={styles.progressTop}>
-        <ActivityIndicator size="small" color={colors.orange} />
-        <Text style={styles.progressLabel}>{label}</Text>
-        <Text style={styles.progressPct}>{value != null ? pct(value) : ''}</Text>
-      </View>
-      <View style={styles.progressTrack}>
-        <View style={[styles.progressFill, { width: `${Math.round((value || 0) * 100)}%` }]} />
-      </View>
-    </Card>
+    <View style={styles.track}
+      accessibilityRole="progressbar"
+      accessibilityValue={{ min: 0, max: 100, now: Math.round((value || 0) * 100) }}>
+      <View style={[styles.fill, { width: `${Math.round((value || 0) * 100)}%` }]} />
+    </View>
+  );
+}
+
+function Secondary({ label, icon, onPress, a11y }) {
+  return (
+    <TouchableOpacity style={styles.secondaryBtn} onPress={onPress} activeOpacity={0.7}
+      accessibilityRole="button" accessibilityLabel={a11y || label}>
+      {icon && <Ionicons name={icon} size={18} color={colors.text} />}
+      <Text style={styles.secondaryText}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+function Primary({ label, icon, onPress, disabled }) {
+  return (
+    <TouchableOpacity style={[styles.primaryBtn, disabled && styles.primaryOff]} onPress={onPress}
+      disabled={disabled} activeOpacity={0.85}
+      accessibilityRole="button" accessibilityState={{ disabled: !!disabled }}>
+      {icon && <Ionicons name={icon} size={20} color={disabled ? colors.textDim : colors.white} />}
+      <Text style={[styles.primaryText, disabled && { color: colors.textDim }]}>{label}</Text>
+    </TouchableOpacity>
   );
 }
 
@@ -75,10 +77,12 @@ export default function RecordScreen() {
   const cancelled = useRef(false);
 
   const [stage, setStage]       = useState('idle');
-  const [clip, setClip]         = useState(null);     // { uri, durationS, source }
+  const [clip, setClip]         = useState(null);     // { uri, durationS, source, sizeMb }
   const [progress, setProgress] = useState(0);
-  const [progressText, setProgressText] = useState('');
-  const [session, setSession]   = useState(null);   // { id, result, video, localUri }
+  const [step, setStep]         = useState('');       // what the laptop is doing now
+  const [reconnecting, setReconnecting] = useState(false);
+  const [done, setDone]         = useState(null);     // { id, total, made }
+  const [error, setError]       = useState(null);
   const [server, setServer]     = useState(null);     // null = checking, true/false
   const [elapsed, setElapsed]   = useState(0);
   const stageRef = useRef(stage);
@@ -124,18 +128,12 @@ export default function RecordScreen() {
   const reset = () => {
     setStage('idle');
     setClip(null);
-    setSession(null);
+    setDone(null);
+    setError(null);
     setProgress(0);
   };
 
   const toggleRecording = async () => {
-    if (!permission?.granted) {
-      const { granted } = await requestPermission();
-      if (!granted) {
-        Alert.alert('Camera required', 'Allow camera access in Settings to record sessions.');
-        return;
-      }
-    }
     if (stage === 'recording') {
       cameraRef.current?.stopRecording();   // recordAsync below resolves with the file
       return;
@@ -152,7 +150,7 @@ export default function RecordScreen() {
       }
     } catch (e) {
       setStage('idle');
-      Alert.alert('Recording failed', e.message);
+      Alert.alert('Recording stopped', e.message);
     }
   };
 
@@ -163,14 +161,16 @@ export default function RecordScreen() {
     const a = res.assets[0];
     setClip({ uri: a.uri, durationS: a.duration ? a.duration / 1000 : null, source: 'library',
               sizeMb: a.fileSize ? a.fileSize / 1e6 : null });
+    setError(null);
     setStage('ready');
   };
 
   const runAnalysis = async () => {
     try {
+      setError(null);
       setStage('uploading');
       setProgress(0);
-      setProgressText('Uploading video…');
+      setStep('Sending the video to your laptop');
       const { name } = await api.uploadVideo(clip.uri, setProgress);
       if (cancelled.current) return;
 
@@ -180,266 +180,326 @@ export default function RecordScreen() {
     } catch (e) {
       if (e.message === 'cancelled') return;
       setStage('ready');
-      Alert.alert('Analysis failed', e.message);
+      setError(`The upload didn't finish: ${e.message}`);
     }
   };
 
-  /** Poll the laptop until the job is done, then open the review. */
+  /** Poll the laptop until the job is done, then show the result. */
   const followJob = async (jobId, name, localUri) => {
     setStage('analyzing');
     setProgress(0);
-    setProgressText('Waiting for the laptop…');
+    setStep('Waiting for the laptop to start');
     try {
       const res = await api.waitForJob(jobId, (p, st) => {
         if (p != null) setProgress(p);
-        setProgressText(
-          st === 'reconnecting' ? 'Connection lost – reconnecting (the laptop keeps working)…'
-          : st === 'analyzing' ? 'Detecting shots…'
-          : `${st[0].toUpperCase()}${st.slice(1)}…`);
+        setReconnecting(st === 'reconnecting');
+        if (st === 'analyzing') setStep('Finding shots');
+        else if (st === 'queued') setStep('Waiting for the laptop to start');
+        else if (st !== 'reconnecting') setStep(`${st[0].toUpperCase()}${st.slice(1)}`);
       }, () => cancelled.current);
       await AsyncStorage.removeItem(PENDING_KEY);
       await saveSession(jobId, res, { localUri });
-      setSession({ id: jobId, result: res, video: name, localUri });
-      setStage('results');
+      const sum = summarizeShots(res.shots || []);
+      setDone({ id: jobId, total: sum.total, made: sum.made });
+      setReconnecting(false);
+      setStage('done');
     } catch (e) {
       if (e.message === 'cancelled') return;   // unmounted – resumes next time
       await AsyncStorage.removeItem(PENDING_KEY);
+      setReconnecting(false);
       setStage(localUri ? 'ready' : 'idle');
-      Alert.alert('Analysis failed', e.status === 404
-        ? 'The laptop no longer has this job (was the server restarted?). Analyze the clip again.'
-        : e.message);
+      setError(e.status === 404
+        ? 'The laptop no longer has this job – it was probably restarted. Analyze the clip again.'
+        : `The analysis stopped: ${e.message}`);
     }
   };
 
   if (!permission) return <View style={styles.container} />;
 
   const busy = stage === 'uploading' || stage === 'analyzing';
+  const camera = (stage === 'idle' || stage === 'recording') && permission.granted;
+  const offline = server === false;
 
-  return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.title}>Session</Text>
-        <TouchableOpacity onPress={checkServer} style={styles.serverPill} accessibilityLabel="Server status">
-          <View style={[styles.serverDot, {
-            backgroundColor: server == null ? colors.textGhost : server ? colors.green : colors.orange,
-          }]} />
-          <Text style={styles.serverText}>
-            {server == null ? 'checking…' : server ? 'laptop online' : 'laptop offline'}
+  // ── top bar: laptop status (tap to check again) + settings ──
+  const topBar = (
+    <View style={[styles.topBar, { paddingTop: insets.top + spacing.xs }]}>
+      {stage === 'recording' ? (
+        <View style={styles.recPill} accessibilityLiveRegion="polite"
+          accessibilityLabel={`Recording, ${fmtTime(elapsed)}`}>
+          <View style={styles.recDot} />
+          <Text style={styles.recTime}>{fmtTime(elapsed)}</Text>
+        </View>
+      ) : (
+        <TouchableOpacity onPress={checkServer} style={styles.statusPill}
+          accessibilityRole="button"
+          accessibilityLabel={server == null ? 'Checking the laptop' : offline ? 'Laptop offline. Check again' : 'Laptop online'}>
+          {server == null
+            ? <ActivityIndicator size="small" color={colors.textMuted} style={{ transform: [{ scale: 0.7 }] }} />
+            : <Ionicons name={offline ? 'cloud-offline-outline' : 'laptop-outline'} size={15}
+                color={offline ? colors.yellow : colors.textMuted} />}
+          <Text style={[styles.statusText, offline && { color: colors.yellow }]}>
+            {server == null ? 'Checking laptop' : offline ? 'Laptop offline' : 'Laptop online'}
           </Text>
         </TouchableOpacity>
-        <TouchableOpacity onPress={() => navigation.navigate('Settings')} style={styles.gear}
-          accessibilityLabel="Settings">
-          <Ionicons name="settings-outline" size={20} color={colors.textMuted} />
-        </TouchableOpacity>
-      </View>
-
-      {stage === 'results' && session?.result ? (
-        <SessionReview
-          session={session}
-          footer={
-            <TouchableOpacity style={[styles.primaryBtn, { marginTop: spacing.md }]} onPress={reset} activeOpacity={0.85}>
-              <Ionicons name="add" size={18} color={colors.white} />
-              <Text style={styles.primaryText}>New session</Text>
-            </TouchableOpacity>
-          }
-        />
-      ) : (
-        <>
-          {/* Viewfinder */}
-          <View style={styles.viewfinder}>
-            {busy ? (
-              <View style={styles.noCam}>
-                <Ionicons name="hardware-chip-outline" size={44} color={colors.textGhost} />
-                <Text style={styles.noCamText}>Your laptop is analyzing the video</Text>
-                <Text style={styles.busyHint}>You can leave the app – it keeps going and resumes here.</Text>
-              </View>
-            ) : permission.granted ? (
-              <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back"
-                mode="video" videoQuality="1080p" mute />
-            ) : (
-              <View style={styles.noCam}>
-                <Ionicons name="camera-outline" size={48} color={colors.textGhost} />
-                <Text style={styles.noCamText}>Camera permission needed</Text>
-                <TouchableOpacity onPress={requestPermission} style={styles.permBtn}>
-                  <Text style={styles.permBtnText}>Allow camera</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-            {stage === 'recording' && (
-              <View style={styles.recIndicator}>
-                <View style={styles.recDot} />
-                <Text style={styles.recLabel}>REC {fmtTime(elapsed)}</Text>
-              </View>
-            )}
-            <View style={styles.statusBadge}>
-              <Text style={styles.statusText}>
-                {stage === 'recording' ? 'Point at the hoop – keep the ball and rim in frame'
-                  : stage === 'ready' ? 'Clip ready'
-                  : busy ? progressText
-                  : 'Record a session or pick a video'}
-              </Text>
-            </View>
-          </View>
-
-          <View style={styles.controls}>
-            {stage === 'ready' && clip && (
-              <Card style={styles.clipCard}>
-                <Ionicons name="film-outline" size={22} color={colors.textMuted} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.clipTitle}>{clip.source === 'camera' ? 'Recorded clip' : 'Video from library'}</Text>
-                  <Text style={styles.clipMeta}>
-                    {[clip.durationS && fmtTime(clip.durationS), clip.sizeMb && `${clip.sizeMb.toFixed(0)} MB`,
-                      'original quality'].filter(Boolean).join(' · ')}
-                  </Text>
-                </View>
-                <TouchableOpacity onPress={reset} accessibilityLabel="Discard clip">
-                  <Ionicons name="trash-outline" size={20} color={colors.textDim} />
-                </TouchableOpacity>
-              </Card>
-            )}
-
-            {busy && <Progress label={progressText} value={progress} />}
-
-            {stage === 'ready' && (
-              <TouchableOpacity
-                style={[styles.primaryBtn, server === false && { opacity: 0.5 }]}
-                onPress={runAnalysis} activeOpacity={0.85}
-              >
-                <Ionicons name="analytics-outline" size={18} color={colors.white} />
-                <Text style={styles.primaryText}>Analyze on laptop</Text>
-              </TouchableOpacity>
-            )}
-            {server === false && !busy && (
-              <Text style={styles.warn}>
-                The laptop server is not reachable. Start it with HOOPER_HOST=0.0.0.0 and check the address in Settings.
-              </Text>
-            )}
-
-            {/* Record / pick */}
-            <View style={styles.recRow}>
-              <TouchableOpacity style={styles.sideBtn} onPress={pickVideo} disabled={busy || stage === 'recording'}
-                accessibilityLabel="Pick a video">
-                <Ionicons name="images-outline" size={22} color={busy ? colors.textGhost : colors.text} />
-                <Text style={styles.sideLbl}>Library</Text>
-              </TouchableOpacity>
-              <RecordButton recording={stage === 'recording'} disabled={busy} onPress={toggleRecording} />
-              <View style={styles.sideBtn}>
-                <Text style={styles.sideLbl}>{stage === 'recording' ? 'tap to stop' : 'tap to record'}</Text>
-              </View>
-            </View>
-          </View>
-        </>
       )}
+      <View style={{ flex: 1 }} />
+      {stage !== 'recording' && (
+        <TouchableOpacity onPress={() => navigation.navigate('Settings')} style={styles.iconBtn}
+          accessibilityRole="button" accessibilityLabel="Settings">
+          <Ionicons name="settings-outline" size={22} color={colors.text} />
+        </TouchableOpacity>
+      )}
+    </View>
+  );
+
+  // ── capture: full-bleed camera, controls in thumb reach ──
+  if (stage === 'idle' || stage === 'recording') {
+    return (
+      <View style={styles.container}>
+        {camera ? (
+          <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back"
+            mode="video" videoQuality="1080p" mute />
+        ) : (
+          <View style={styles.centerPanel}>
+            <View style={styles.bigIcon}><Ionicons name="videocam-outline" size={34} color={colors.text} /></View>
+            <Text style={styles.panelTitle}>Film your shots</Text>
+            <Text style={styles.panelBody}>
+              HooperAI uses the camera to record your session. Videos go only to your own laptop for analysis.
+            </Text>
+            {permission.canAskAgain ? (
+              <Primary label="Continue" onPress={requestPermission} />
+            ) : (
+              <Primary label="Open Settings" icon="settings-outline" onPress={() => Linking.openSettings()} />
+            )}
+          </View>
+        )}
+        {topBar}
+
+        <View style={styles.captureBottom}>
+          {error && (
+            <Text style={styles.errorText} accessibilityLiveRegion="polite">{error}</Text>
+          )}
+          {camera && stage === 'idle' && (
+            <Text style={styles.hint}>Keep the hoop and the ball in frame</Text>
+          )}
+          <View style={styles.shutterRow}>
+            <TouchableOpacity style={styles.sideBtn} onPress={pickVideo} disabled={stage === 'recording'}
+              accessibilityRole="button" accessibilityLabel="Choose a video from your library">
+              <View style={[styles.sideIcon, stage === 'recording' && { opacity: 0.3 }]}>
+                <Ionicons name="images-outline" size={22} color={colors.white} />
+              </View>
+              <Text style={[styles.sideLbl, stage === 'recording' && { opacity: 0.3 }]}>Library</Text>
+            </TouchableOpacity>
+            {camera ? <Shutter recording={stage === 'recording'} onPress={toggleRecording} /> : <View style={styles.shutter} />}
+            <View style={styles.sideBtn} />
+          </View>
+        </View>
+      </View>
+    );
+  }
+
+  // ── after capture: one panel per state ──
+  return (
+    <View style={styles.container}>
+      {topBar}
+      <View style={styles.panelWrap}>
+
+        {stage === 'ready' && clip && (
+          <>
+            <View style={styles.clipCard}>
+              <View style={styles.clipIcon}><Ionicons name="film-outline" size={22} color={colors.text} /></View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.clipTitle}>
+                  {clip.source === 'camera' ? 'New recording' : clip.source === 'library' ? 'Video from your library' : 'Your clip'}
+                </Text>
+                <Text style={styles.clipMeta}>
+                  {[clip.durationS && fmtTime(clip.durationS), clip.sizeMb && `${clip.sizeMb.toFixed(0)} MB`,
+                    'original quality'].filter(Boolean).join(' · ')}
+                </Text>
+              </View>
+            </View>
+
+            {error && (
+              <View style={styles.notice} accessibilityLiveRegion="polite">
+                <Ionicons name="alert-circle-outline" size={20} color={colors.yellow} />
+                <Text style={styles.noticeText}>{error}</Text>
+              </View>
+            )}
+            {offline && (
+              <View style={styles.notice}>
+                <Ionicons name="cloud-offline-outline" size={20} color={colors.yellow} />
+                <View style={{ flex: 1, gap: spacing.sm }}>
+                  <Text style={styles.noticeText}>
+                    Your laptop can't be reached. Make sure the HooperAI server is running and the phone is on the same network.
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: spacing.lg }}>
+                    <TouchableOpacity onPress={checkServer} hitSlop={10} accessibilityRole="button">
+                      <Text style={styles.link}>Check again</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => navigation.navigate('Settings')} hitSlop={10} accessibilityRole="button">
+                      <Text style={styles.link}>Server address</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            )}
+
+            <View style={styles.actions}>
+              <Primary label="Analyze on laptop" icon="sparkles-outline" onPress={runAnalysis} disabled={server !== true} />
+              <Secondary label="Discard" icon="trash-outline" onPress={reset} a11y="Discard this clip" />
+            </View>
+          </>
+        )}
+
+        {busy && (
+          <View style={styles.progressPanel}>
+            <Text style={styles.stepCount}>Step {stage === 'uploading' ? 1 : 2} of 2</Text>
+            <Text style={styles.panelTitle} accessibilityLiveRegion="polite">{step}</Text>
+            <View style={styles.progressRow}>
+              <View style={{ flex: 1 }}><ProgressBar value={progress} /></View>
+              <Text style={styles.pct}>{Math.round(progress * 100)}%</Text>
+            </View>
+            {reconnecting ? (
+              <View style={styles.notice} accessibilityLiveRegion="polite">
+                <ActivityIndicator size="small" color={colors.yellow} />
+                <Text style={styles.noticeText}>
+                  Connection lost – reconnecting. Your laptop keeps working in the meantime.
+                </Text>
+              </View>
+            ) : (
+              <Text style={styles.panelBody}>
+                {stage === 'uploading'
+                  ? 'Keep the app open until the upload finishes.'
+                  : 'You can leave this screen or the app – the result will be waiting here.'}
+              </Text>
+            )}
+            {stage === 'analyzing' && (
+              <View style={styles.actions}>
+                <Secondary label="Back to Home" icon="home-outline" onPress={() => navigation.navigate('Home')} />
+              </View>
+            )}
+          </View>
+        )}
+
+        {stage === 'done' && done && (
+          <View style={styles.centerPanel}>
+            <View style={[styles.bigIcon, styles.bigIconDone]}>
+              <Ionicons name="checkmark" size={36} color={colors.white} />
+            </View>
+            <Text style={styles.panelTitle} accessibilityRole="header">Analysis complete</Text>
+            <Text style={styles.doneStat} maxFontSizeMultiplier={1.4}>
+              {done.total ? `${done.made} / ${done.total}` : 'No shots'}
+            </Text>
+            <Text style={styles.panelBody}>
+              {done.total
+                ? `${done.total === 1 ? 'shot' : 'shots'} made. Watch each one and confirm it to improve detection.`
+                : 'No shots were found. Open the session to add any the detector missed.'}
+            </Text>
+            <View style={[styles.actions, { alignSelf: 'stretch' }]}>
+              <Primary label={done.total ? 'Review shots' : 'Open session'} icon="play-circle-outline"
+                onPress={() => { const id = done.id; reset(); navigation.navigate('Session', { sessionId: id }); }} />
+              <Secondary label="New session" icon="add" onPress={reset} />
+            </View>
+          </View>
+        )}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.bgScreen },
+  container: { flex: 1, backgroundColor: colors.bg },
 
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.xl,
-    paddingBottom: spacing.md,
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#1e1e1e',
+  topBar: {
+    position: 'absolute', top: 0, left: 0, right: 0, zIndex: 2,
+    flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.lg,
   },
-  title: { flex: 1, fontSize: font.md, fontWeight: '500', color: colors.white },
-  serverPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    borderWidth: 0.5, borderColor: colors.border, borderRadius: radius.full,
-    paddingHorizontal: spacing.sm, paddingVertical: 3,
+  statusPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 36,
+    backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: radius.full, paddingHorizontal: spacing.md,
   },
-  serverDot: { width: 7, height: 7, borderRadius: 3.5 },
-  serverText: { fontSize: font.xs, color: colors.textMuted },
-  gear: { padding: 4 },
+  statusText: { fontSize: font.sm, color: colors.text, fontWeight: '500' },
+  recPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 36,
+    backgroundColor: colors.red, borderRadius: radius.full, paddingHorizontal: spacing.md,
+  },
+  recDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.white },
+  recTime: { fontSize: font.md, color: colors.white, fontWeight: '600', fontVariant: ['tabular-nums'] },
+  iconBtn: {
+    width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
 
-  viewfinder: {
-    height: 300,
-    backgroundColor: '#050505',
-    position: 'relative',
-    justifyContent: 'flex-end',
-    alignItems: 'center',
+  captureBottom: {
+    position: 'absolute', left: 0, right: 0, bottom: 0,
+    paddingBottom: spacing.xl, paddingTop: spacing.lg, gap: spacing.md,
+    backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center',
   },
-  noCam: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md },
-  noCamText: { fontSize: font.base, color: colors.textMuted },
-  busyHint: { fontSize: font.sm, color: colors.textDim, textAlign: 'center', paddingHorizontal: spacing.xl },
-  permBtn: {
-    backgroundColor: colors.orange,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.md,
+  hint: { fontSize: font.base, color: colors.text },
+  errorText: { fontSize: font.base, color: colors.yellow, textAlign: 'center', paddingHorizontal: spacing.xl },
+  shutterRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    alignSelf: 'stretch', paddingHorizontal: spacing.xxl,
   },
-  permBtnText: { color: colors.white, fontSize: font.base, fontWeight: '500' },
-  recIndicator: {
-    position: 'absolute', top: 10, right: 12,
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: radius.full, paddingHorizontal: 8, paddingVertical: 3,
+  sideBtn: { width: 64, alignItems: 'center', gap: 4 },
+  sideIcon: {
+    width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.14)',
   },
-  recDot: { width: 7, height: 7, borderRadius: 3.5, backgroundColor: colors.orange },
-  recLabel: { fontSize: font.sm, color: colors.orange, fontVariant: ['tabular-nums'] },
-  statusBadge: {
-    position: 'absolute',
-    bottom: 10,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    borderWidth: 0.5,
-    borderColor: '#333',
-    borderRadius: radius.full,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 4,
-    maxWidth: '92%',
+  sideLbl: { fontSize: font.sm, color: colors.white },
+  shutter: {
+    width: 76, height: 76, borderRadius: 38, borderWidth: 4, borderColor: colors.white,
+    alignItems: 'center', justifyContent: 'center',
   },
-  statusText: { fontSize: font.sm, color: colors.textMuted },
+  shutterInner: { width: 60, height: 60, borderRadius: 30, backgroundColor: colors.red },
+  shutterStop: { borderRadius: 10 },
 
-  controls: { flex: 1, padding: spacing.lg, gap: spacing.md, justifyContent: 'flex-end' },
+  panelWrap: { flex: 1, justifyContent: 'center', padding: spacing.xl, gap: spacing.lg },
+  centerPanel: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md, padding: spacing.xl },
+  bigIcon: {
+    width: 72, height: 72, borderRadius: 36, backgroundColor: colors.bgCard,
+    alignItems: 'center', justifyContent: 'center', marginBottom: spacing.sm,
+  },
+  bigIconDone: { backgroundColor: colors.green },
+  panelTitle: { fontSize: 22, fontWeight: '700', color: colors.white, textAlign: 'center' },
+  panelBody: { fontSize: font.md, color: colors.textMuted, textAlign: 'center', lineHeight: 21 },
+  doneStat: { fontSize: 48, fontWeight: '700', color: colors.white, fontVariant: ['tabular-nums'] },
 
-  clipCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md },
-  clipTitle: { fontSize: font.base, color: colors.white },
-  clipMeta: { fontSize: font.xs, color: colors.textDim, marginTop: 2 },
+  clipCard: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
+    backgroundColor: colors.bgCard, borderRadius: radius.lg, padding: spacing.lg,
+  },
+  clipIcon: {
+    width: 44, height: 44, borderRadius: radius.md, backgroundColor: colors.bgCardDeep,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  clipTitle: { fontSize: font.md, fontWeight: '600', color: colors.white },
+  clipMeta: { fontSize: font.base, color: colors.textMuted, marginTop: 2 },
 
-  progressCard: { padding: spacing.md, gap: spacing.sm },
-  progressTop: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  progressLabel: { flex: 1, fontSize: font.base, color: colors.text },
-  progressPct: { fontSize: font.sm, color: colors.textMuted, fontVariant: ['tabular-nums'] },
-  progressTrack: { height: 5, backgroundColor: colors.bgCardDeep, borderRadius: radius.full, overflow: 'hidden' },
-  progressFill: { height: '100%', backgroundColor: colors.orange },
+  notice: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: spacing.md,
+    backgroundColor: colors.yellowFade, borderRadius: radius.lg, padding: spacing.lg,
+  },
+  noticeText: { flex: 1, fontSize: font.base, color: colors.text, lineHeight: 19 },
+  link: { fontSize: font.base, color: colors.white, fontWeight: '600', textDecorationLine: 'underline' },
 
+  progressPanel: { gap: spacing.md },
+  stepCount: { fontSize: font.sm, color: colors.textDim, textAlign: 'center', textTransform: 'uppercase', letterSpacing: 0.8 },
+  progressRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, marginVertical: spacing.sm },
+  track: { height: 6, backgroundColor: colors.bgCard, borderRadius: radius.full, overflow: 'hidden' },
+  fill: { height: '100%', backgroundColor: colors.orange, borderRadius: radius.full },
+  pct: { width: 44, textAlign: 'right', fontSize: font.md, color: colors.text, fontVariant: ['tabular-nums'] },
+
+  actions: { gap: spacing.sm, marginTop: spacing.sm },
   primaryBtn: {
-    backgroundColor: colors.orange,
-    borderRadius: radius.md,
-    paddingVertical: 13,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 7,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm,
+    backgroundColor: colors.orange, borderRadius: radius.lg, minHeight: 50, paddingHorizontal: spacing.xl,
   },
-  primaryText: { color: colors.white, fontSize: font.md, fontWeight: '500' },
-  warn: { fontSize: font.sm, color: colors.yellow, textAlign: 'center' },
-
-  recRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
+  primaryOff: { backgroundColor: colors.bgCard },
+  primaryText: { fontSize: 17, fontWeight: '700', color: colors.white },
+  secondaryBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm,
+    minHeight: 50, borderRadius: radius.lg,
   },
-  sideBtn: { width: 72, alignItems: 'center', gap: 4 },
-  sideLbl: { fontSize: font.xs, color: colors.textGhost, textAlign: 'center' },
-  recOuter: {
-    width: 64, height: 64,
-    borderRadius: 32,
-    borderWidth: 3,
-    borderColor: colors.white,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  recInner: { width: 48, height: 48, borderRadius: 24, backgroundColor: colors.orange },
-  recInnerStop: { width: 22, height: 22, borderRadius: 4 },
-
-
-
-
+  secondaryText: { fontSize: 17, fontWeight: '500', color: colors.text },
 });

@@ -152,7 +152,7 @@ cd HooperAI && npx expo start                      # app; Expo Go → exp://<lap
 
 ## 8. Ticket log (HPAI-XX)
 
-Next free ticket: **HPAI-25**. Workflow: `docs/WORKFLOW.md`.
+Next free ticket: **HPAI-26**. Workflow: `docs/WORKFLOW.md`.
 
 | Ticket | Type | Title | Status |
 |---|---|---|---|
@@ -180,6 +180,7 @@ Next free ticket: **HPAI-25**. Workflow: `docs/WORKFLOW.md`.
 | HPAI-22 | feature | Measurement: rim-width scale, release speed, arc height, entry angle | Done |
 | HPAI-23 | feature | Home screen redesign (Apple HIG): "Today" hero with makes/attempts + shot-log dots, review prompt, labelled tab bar, WCAG-contrast text colours | Done |
 | HPAI-24 | fix | Detection defaults from the end-to-end eval: ball 0.35 / others 0.75, rule v3, old trigger | Done |
+| HPAI-25 | feature | Record + Session screens redesign (Apple HIG): full-bleed camera, one panel per state (permission, ready, offline, upload/analyze steps, done, error), review on the Session screen, 11 pt minimum text, red only for recording | Done |
 
 ---
 
