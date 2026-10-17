@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -25,12 +25,22 @@ function CustomTabBar({ state, descriptors, navigation }) {
           if (!isFocused && !event.defaultPrevented) navigation.navigate(route.name);
         };
 
+        // Tabs navigate (Record opens the Record section); every tab has a label
+        // and the inactive colour keeps 5.2:1 contrast (tab-bars.md, accessibility.md).
+        const a11y = {
+          accessibilityRole: 'tab',
+          accessibilityState: { selected: isFocused },
+          accessibilityLabel: route.name,
+        };
+
         if (isCenter) {
           return (
-            <TouchableOpacity key={route.key} onPress={onPress} style={styles.centerWrap} activeOpacity={0.85}>
-              <View style={styles.centerBtn}>
+            <TouchableOpacity key={route.key} onPress={onPress} style={styles.centerWrap}
+              activeOpacity={0.85} {...a11y}>
+              <View style={[styles.centerBtn, isFocused && styles.centerBtnOn]}>
                 <Ionicons name="videocam" size={24} color={colors.white} />
               </View>
+              <Text style={[styles.label, isFocused && styles.labelOn]}>Record</Text>
             </TouchableOpacity>
           );
         }
@@ -39,8 +49,10 @@ function CustomTabBar({ state, descriptors, navigation }) {
         const iconName = isFocused ? iconMap[route.name] : iconMap[route.name] + '-outline';
 
         return (
-          <TouchableOpacity key={route.key} onPress={onPress} style={styles.tabItem} activeOpacity={0.7}>
-            <Ionicons name={iconName} size={24} color={isFocused ? colors.orange : colors.textGhost} />
+          <TouchableOpacity key={route.key} onPress={onPress} style={styles.tabItem}
+            activeOpacity={0.7} {...a11y}>
+            <Ionicons name={iconName} size={24} color={isFocused ? colors.orange : colors.textDim} />
+            <Text style={[styles.label, isFocused && styles.labelOn]}>{route.name}</Text>
           </TouchableOpacity>
         );
       })}
@@ -73,13 +85,18 @@ const styles = StyleSheet.create({
   tabItem: {
     flex: 1,
     alignItems: 'center',
+    minHeight: 44,
     paddingVertical: 4,
+    gap: 2,
   },
   centerWrap: {
     flex: 1,
     alignItems: 'center',
     marginTop: -20,
+    gap: 2,
   },
+  label: { fontSize: 11, color: colors.textDim, fontWeight: '500' },
+  labelOn: { color: colors.orange },
   centerBtn: {
     width: 52,
     height: 52,
@@ -90,4 +107,5 @@ const styles = StyleSheet.create({
     borderWidth: 3,
     borderColor: colors.bg,
   },
+  centerBtnOn: { borderColor: 'rgba(232,93,38,0.35)' },
 });

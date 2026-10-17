@@ -7,23 +7,33 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, radius, spacing, font } from '../utils/theme';
-import { Card, SectionLabel, PrimaryButton, Divider } from '../components';
-import { getShots, getSessions, sessionSummary, formatTimeAgo, calcStats } from '../utils/storage';
+import { Card, SectionLabel, Divider } from '../components';
+import { getSessions, sessionSummary, formatTimeAgo, NOT_A_SHOT } from '../utils/storage';
 import { syncSessions } from '../services/sync';
+
+const MAX_DOTS = 40;
+
+const isToday = ts => new Date(ts).toDateString() === new Date().toDateString();
+
+/** Today's shots across analyzed sessions, oldest first: true = made, false = missed. */
+function todaysShots(sessions) {
+  return sessions
+    .filter(s => isToday(s.timestamp))
+    .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+    .flatMap(s => [...(s.result?.shots || [])]
+      .sort((a, b) => (a.start_frame ?? 0) - (b.start_frame ?? 0))
+      .filter(sh => sh.label !== NOT_A_SHOT)
+      .map(sh => (sh.label ?? sh.prediction) === 1));
+}
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
-  const [shots, setShots] = useState([]);
   const [sessions, setSessions] = useState([]);
-  const [stats, setStats] = useState({ total: 0, made: 0, missed: 0, pct: 0 });
   const [refreshing, setRefreshing] = useState(false);
 
+  // sessions saved before review support have no result to open
   const readLocal = useCallback(async () => {
-    const data = await getShots();
-    setShots(data);
-    setStats(calcStats(data));
-    // sessions saved before review support have no result to open
     setSessions((await getSessions()).filter(s => s.result));
   }, []);
 
@@ -41,62 +51,97 @@ export default function HomeScreen() {
     setRefreshing(false);
   };
 
-  const todayShots = shots.filter(s => {
-    const d = new Date(s.timestamp);
-    const now = new Date();
-    return d.toDateString() === now.toDateString();
-  });
-  const todayStats = calcStats(todayShots);
+  const today = todaysShots(sessions);
+  const made = today.filter(Boolean).length;
+  const pct = today.length ? Math.round((made / today.length) * 100) : null;
+  const dots = today.slice(-MAX_DOTS);
+
+  const summaries = sessions.map(s => ({ s, sum: sessionSummary(s) }));
+  const toReview = summaries.filter(({ sum }) => sum.total - sum.labeled > 0);
+  const toReviewShots = toReview.reduce((n, { sum }) => n + sum.total - sum.labeled, 0);
+
+  const openSession = id => navigation.navigate('Session', { sessionId: id });
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* Header */}
-      <View style={styles.header}>
-        <View style={styles.logoRow}>
-          <View style={styles.logoIcon}><Text style={{ fontSize: 15 }}>🏀</Text></View>
-          <Text style={styles.logoText}>Hooper<Text style={{ color: colors.orange }}>AI</Text></Text>
-          <TouchableOpacity onPress={() => navigation.navigate('Settings')} style={{ marginLeft: 'auto', padding: 4 }}
-            accessibilityLabel="Settings">
-            <Ionicons name="settings-outline" size={20} color={colors.textMuted} />
-          </TouchableOpacity>
-        </View>
-        <Text style={styles.headerSub}>
-          {new Date().toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}
-        </Text>
-      </View>
-
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.orange} />}
       >
-        {/* Today's session card */}
-        <Card style={styles.sessionCard}>
-          <SectionLabel>Today's session</SectionLabel>
-          <View style={styles.statRow}>
-            <View style={styles.statCell}>
-              <Text style={styles.statVal}>{todayStats.total}</Text>
-              <Text style={styles.statLbl}>shots</Text>
-            </View>
-            <View style={[styles.statCell, styles.statCellBorder]}>
-              <Text style={[styles.statVal, { color: colors.green }]}>{todayStats.pct}%</Text>
-              <Text style={styles.statLbl}>made</Text>
-            </View>
-            <View style={styles.statCell}>
-              <Text style={[styles.statVal, { color: colors.orange }]}>{todayStats.missed}</Text>
-              <Text style={styles.statLbl}>missed</Text>
-            </View>
+        {/* Large title: the tab says where you are; the date says when */}
+        <View style={styles.header}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.title} accessibilityRole="header">Today</Text>
+            <Text style={styles.date}>
+              {new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}
+            </Text>
           </View>
-          <PrimaryButton
-            label="Start new session"
+          <TouchableOpacity onPress={() => navigation.navigate('Settings')} style={styles.iconBtn}
+            accessibilityRole="button" accessibilityLabel="Settings">
+            <Ionicons name="settings-outline" size={22} color={colors.textMuted} />
+          </TouchableOpacity>
+        </View>
+
+        {/* Hero: makes / attempts and the shot log, in the order you shot them */}
+        <Card style={styles.hero}>
+          <View
+            accessible
+            accessibilityLabel={today.length
+              ? `${made} of ${today.length} shots made today, ${pct} percent`
+              : 'No shots today'}
+          >
+            <View style={styles.tallyRow}>
+              <Text style={styles.tally} maxFontSizeMultiplier={1.4}>
+                {made}
+                <Text style={styles.tallyOf}> / {today.length}</Text>
+              </Text>
+              {pct != null && (
+                <Text style={styles.pct} maxFontSizeMultiplier={1.4}>{pct}%</Text>
+              )}
+            </View>
+            <Text style={styles.tallyLbl}>
+              {today.length ? 'makes today' : 'No shots yet today'}
+            </Text>
+
+            {dots.length > 0 && (
+              <View style={styles.dots}>
+                {dots.map((m, i) => (
+                  <View key={i} style={[styles.dot, m ? styles.dotMade : styles.dotMissed]} />
+                ))}
+              </View>
+            )}
+          </View>
+
+          <TouchableOpacity style={styles.recordBtn} activeOpacity={0.85}
             onPress={() => navigation.navigate('Record')}
-          />
+            accessibilityRole="button" accessibilityLabel="Record a session">
+            <Ionicons name="videocam" size={20} color={colors.white} />
+            <Text style={styles.recordText}>Record a session</Text>
+          </TouchableOpacity>
         </Card>
 
+        {/* Review prompt, only when there is something to review */}
+        {toReviewShots > 0 && (
+          <TouchableOpacity style={styles.reviewRow} activeOpacity={0.7}
+            onPress={() => openSession(toReview[0].s.id)}
+            accessibilityRole="button"
+            accessibilityLabel={`${toReviewShots} shots to review. Opens the latest session.`}>
+            <Ionicons name="checkmark-done-outline" size={20} color={colors.yellow} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.reviewTitle}>
+                {toReviewShots} {toReviewShots === 1 ? 'shot' : 'shots'} to review
+              </Text>
+              <Text style={styles.reviewSub}>Your labels make the next model better</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.textDim} />
+          </TouchableOpacity>
+        )}
+
         {/* Sessions */}
-        <View style={styles.logHeader}>
+        <View style={styles.listHeader}>
           <SectionLabel style={{ marginBottom: 0 }}>Sessions</SectionLabel>
-          <Text style={styles.logSub}>{sessions.length} analyzed</Text>
+          {sessions.length > 0 && <Text style={styles.listSub}>{sessions.length}</Text>}
         </View>
 
         <Card style={{ padding: 0, overflow: 'hidden' }}>
@@ -107,36 +152,29 @@ export default function HomeScreen() {
               <Text style={styles.emptyHint}>Record or pick a video to analyze your shots</Text>
             </View>
           ) : (
-            sessions.slice(0, 30).map((s, i, list) => {
-              const sum = sessionSummary(s);
-              const toReview = sum.total - sum.labeled;
+            summaries.slice(0, 30).map(({ s, sum }, i, list) => {
+              const left = sum.total - sum.labeled;
+              const when = new Date(s.timestamp).toLocaleString('en-GB',
+                { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+              const stat = sum.total
+                ? `${sum.made} / ${sum.total} made${sum.pct != null ? ` · ${sum.pct}%` : ''}`
+                : 'No shots found';
               return (
                 <View key={s.id}>
                   <TouchableOpacity style={styles.sessionRow} activeOpacity={0.7}
-                    onPress={() => navigation.navigate('Session', { sessionId: s.id })}>
-                    <View style={styles.sessionIcon}>
-                      <Ionicons name="film-outline" size={18} color={colors.textMuted} />
-                    </View>
+                    onPress={() => openSession(s.id)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${when}. ${stat}. ${left > 0 ? `${left} to review` : sum.total ? 'Reviewed' : ''}`}>
                     <View style={{ flex: 1, gap: 3 }}>
-                      <Text style={styles.sessionTitle}>
-                        {new Date(s.timestamp).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                      </Text>
-                      <Text style={styles.sessionMeta}>
-                        {sum.total} {sum.total === 1 ? 'shot' : 'shots'} · {sum.made} made
-                        {sum.pct != null ? ` · ${sum.pct}%` : ''} · {formatTimeAgo(s.timestamp)}
-                      </Text>
-                      {sum.total > 0 && (
-                        <View style={styles.progressTrack}>
-                          <View style={[styles.progressFill, { width: `${(sum.labeled / sum.total) * 100}%` }]} />
-                        </View>
-                      )}
+                      <Text style={styles.sessionTitle}>{when}</Text>
+                      <Text style={styles.sessionMeta}>{stat} · {formatTimeAgo(s.timestamp)}</Text>
                     </View>
-                    {toReview > 0 ? (
-                      <View style={styles.reviewBadge}>
-                        <Text style={styles.reviewText}>{toReview} to review</Text>
+                    {left > 0 ? (
+                      <View style={styles.badge}>
+                        <Text style={styles.badgeText}>{left} to review</Text>
                       </View>
                     ) : sum.total > 0 ? (
-                      <Ionicons name="checkmark-circle" size={18} color={colors.green} />
+                      <Text style={styles.reviewed}>Reviewed</Text>
                     ) : null}
                     <Ionicons name="chevron-forward" size={16} color={colors.textGhost} />
                   </TouchableOpacity>
@@ -153,65 +191,49 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bgScreen },
-
-  sessionRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.md },
-  sessionIcon: {
-    width: 36, height: 36, borderRadius: 18, backgroundColor: colors.bgCardDeep,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  sessionTitle: { fontSize: font.base, color: colors.white },
-  sessionMeta: { fontSize: font.xs, color: colors.textDim },
-  progressTrack: { height: 3, backgroundColor: colors.bgCardDeep, borderRadius: radius.full, overflow: 'hidden', marginTop: 2 },
-  progressFill: { height: '100%', backgroundColor: colors.green },
-  reviewBadge: {
-    backgroundColor: colors.yellowFade, borderRadius: radius.full,
-    paddingHorizontal: spacing.sm, paddingVertical: 2,
-  },
-  reviewText: { fontSize: font.xs, color: colors.yellow, fontWeight: '600' },
-
-  header: {
-    backgroundColor: colors.bgScreen,
-    paddingHorizontal: spacing.xl,
-    paddingBottom: spacing.md,
-    borderBottomWidth: 0.5,
-    borderBottomColor: '#1e1e1e',
-  },
-  logoRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: 2 },
-  logoIcon: {
-    width: 28, height: 28,
-    backgroundColor: colors.orange,
-    borderRadius: radius.sm,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  logoText: { fontSize: font.lg, fontWeight: '500', color: colors.white, letterSpacing: -0.3 },
-  headerSub: { fontSize: font.sm, color: colors.textDim },
-
   scroll: { flex: 1 },
   scrollContent: { padding: spacing.lg, gap: spacing.lg, paddingBottom: 40 },
 
-  sessionCard: { gap: spacing.md },
-  statRow: { flexDirection: 'row', marginBottom: spacing.sm },
-  statCell: { flex: 1, alignItems: 'center', paddingVertical: spacing.sm },
-  statCellBorder: {
-    borderLeftWidth: 0.5, borderRightWidth: 0.5,
-    borderColor: colors.border,
-  },
-  statVal: { fontSize: 22, fontWeight: '500', color: colors.white },
-  statLbl: { fontSize: font.xs, color: colors.textDim, marginTop: 2 },
+  header: { flexDirection: 'row', alignItems: 'flex-start', paddingTop: spacing.sm, paddingHorizontal: 2 },
+  title: { fontSize: 34, fontWeight: '700', color: colors.white, letterSpacing: 0.4 },
+  date: { fontSize: font.md, color: colors.textMuted, marginTop: 2 },
+  iconBtn: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', marginRight: -10 },
 
-  logHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 2,
-  },
-  logSub: { fontSize: font.sm, color: colors.textGhost },
+  hero: { gap: spacing.lg, padding: spacing.xl },
+  tallyRow: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between' },
+  tally: { fontSize: 56, fontWeight: '700', color: colors.white, letterSpacing: -1, fontVariant: ['tabular-nums'] },
+  tallyOf: { fontSize: 32, fontWeight: '600', color: colors.textDim },
+  pct: { fontSize: 28, fontWeight: '600', color: colors.green, fontVariant: ['tabular-nums'] },
+  tallyLbl: { fontSize: font.md, color: colors.textMuted, marginTop: -2 },
+  dots: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: spacing.lg },
+  dot: { width: 10, height: 10, borderRadius: 5 },
+  dotMade: { backgroundColor: colors.green },
+  dotMissed: { borderWidth: 1.5, borderColor: colors.textDim },
 
-  emptyState: {
-    alignItems: 'center',
-    paddingVertical: 40,
-    gap: spacing.sm,
+  recordBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm,
+    backgroundColor: colors.orange, borderRadius: radius.lg, minHeight: 50,
   },
+  recordText: { fontSize: 17, fontWeight: '700', color: colors.white },
+
+  reviewRow: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.md,
+    backgroundColor: colors.bgCard, borderRadius: radius.lg, padding: spacing.lg, minHeight: 44,
+  },
+  reviewTitle: { fontSize: font.md, fontWeight: '600', color: colors.white },
+  reviewSub: { fontSize: font.base, color: colors.textMuted, marginTop: 2 },
+
+  listHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 2 },
+  listSub: { fontSize: font.base, color: colors.textDim },
+
+  sessionRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, padding: spacing.lg, minHeight: 56 },
+  sessionTitle: { fontSize: font.md, color: colors.white },
+  sessionMeta: { fontSize: font.base, color: colors.textMuted },
+  badge: { backgroundColor: colors.yellowFade, borderRadius: radius.full, paddingHorizontal: spacing.sm, paddingVertical: 3 },
+  badgeText: { fontSize: font.sm, color: colors.yellow, fontWeight: '600' },
+  reviewed: { fontSize: font.sm, color: colors.textDim },
+
+  emptyState: { alignItems: 'center', paddingVertical: 40, gap: spacing.sm },
   emptyText: { fontSize: font.md, color: colors.textMuted, marginTop: spacing.sm },
-  emptyHint: { fontSize: font.sm, color: colors.textGhost },
+  emptyHint: { fontSize: font.base, color: colors.textDim, textAlign: 'center', paddingHorizontal: spacing.xl },
 });
